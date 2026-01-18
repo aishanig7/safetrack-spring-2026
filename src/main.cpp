@@ -8,7 +8,7 @@
 #include <cstdio>
 
 // Definitions
-#define LED PIN_015
+#define LED (0 + 15)
 #define OLED_RESET -1
 #define gpsSerial Serial1
 #define DISPLAY_WIDTH 128
