@@ -6,6 +6,7 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <cstdio>
+#include "gpsPacket.h"
 
 // Definitions
 #define LED (0 + 15)
