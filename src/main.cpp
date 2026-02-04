@@ -14,6 +14,7 @@
 #define gpsSerial Serial1
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
+#define BUTTON_PIN (0+32)
 
 // Declarations Functions
 void setFlag(void);
@@ -45,6 +46,17 @@ const uint16_t PREAMBLE = 16;
 const uint8_t SYNCWORD = 0x2B;
 volatile bool receivedFlag = false; // flag to indicate that a packet was received (IRQ)
 
+//button state variables
+int buttonState = 0;
+int lastButtonState = 0; 
+
+//display variables
+int showRX = 0; 
+
+//Role Definitions
+//#define ROLE_TX
+#define ROLE_RX
+
 void setFlag(void) {
   // we got a packet, set the flag
   receivedFlag = true;
@@ -52,6 +64,7 @@ void setFlag(void) {
 
 void setup(){
 	pinMode(LED, OUTPUT); //set output mode
+	pinMode(BUTTON_PIN, INPUT);
 	digitalWrite(LED, LOW);
 	
 	gpsSerial.begin(9600);
@@ -131,6 +144,7 @@ void setup(){
 
 void loop() {
 	const size_t BUF_SZ = 256;
+
     // Read and decode GPS data
     while (gpsSerial.available() > 0) {
         gps.encode(gpsSerial.read());
@@ -187,73 +201,109 @@ void loop() {
             display.display();
         }
     }
+	
 
-	if(receivedFlag) {
-	  // reset flag
-	  receivedFlag = false;
+	#ifdef ROLE_TX 
+		buttonState = digitalRead(BUTTON_PIN);
+		if (buttonState != lastButtonState) {
+			if (buttonState == LOW) {
+				Serial.println("Button Pressed Once!");
+				display.clearDisplay();  
+				display.setCursor(0,0); 
+				display.print("TX: Node Ready"); 
+				display.display(); 
 
-	  // you can read received data as an Arduino String
-	  String str;
-	  int state = radio.readData(str);
+				// Build GPS packet
+				uint8_t outBuf[sizeof(GPSPacket)];
+				buildPacket(45.8239, -112.5641, outBuf);
 
-	  // you can also read received data as byte array
-	  //byte byteArr[8];
-	  //int numBytes = radio.getPacketLength();
-	  //int state = radio.readData(byteArr, numBytes);
-
-	  if (state == RADIOLIB_ERR_NONE) {
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // Set color for date (also for overwr)
-		display.setCursor(0,30);
-		display.print("                   ");
-		display.setCursor(0,40);
-		display.print("                   ");
-		display.display();
-		char charStr[16];
-		str.toCharArray(charStr, sizeof(charStr));
-		snprintf(recvBuffer, sizeof(recvBuffer), "%s", &charStr);
-        display.setCursor(0, 30); // curosr pos for lora stuff
-        display.print(recvBuffer);
-
-
-	    // packet was successfully received
-	    Serial.println(F("[SX1262] Received packet!"));
-
-	    // print data of the packet
-	    Serial.print(F("[SX1262] Data:\t\t"));
-	    Serial.println(str);
+				// Transmit
+				radio.standby();
+				int st = radio.transmit(outBuf, sizeof(GPSPacket));
+				if (st == RADIOLIB_ERR_NONE) Serial.println("TX: GPS packet sent");
+				else {
+					Serial.print("TX error: "); Serial.println(st);
+				}
+				} else {
+					Serial.println("Button Released");
+				}
+				// Return to RX
+				radio.startReceive();
+			delay(50); // A small delay is necessary to prevent multiple readings due to mechanical bouncing
+		}
+		lastButtonState = buttonState;
+		
+	#endif
 
 
-	    // print RSSI (Received Signal Strength Indicator)
-		float rssi = radio.getRSSI();
-		snprintf(rssiBuffer, sizeof(rssiBuffer), "%f dBm", rssi);
-		display.setCursor(0, 40);
-		display.print(rssiBuffer);
-	    Serial.print(F("[SX1262] RSSI:\t\t"));
-	    Serial.print(rssi);
-	    Serial.println(F(" dBm"));
+	#ifdef ROLE_RX
+		display.clearDisplay();
+		display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+		display.setCursor(0, 0);
+		if (showRX == 0){
+			display.println("Waiting for packet...");
+			display.display();
+		}
 
-	    // print SNR (Signal-to-Noise Ratio)
-	    Serial.print(F("[SX1262] SNR:\t\t"));
-	    Serial.print(radio.getSNR());
-	    Serial.println(F(" dB"));
+		if(receivedFlag) {
+			// reset flag
+			receivedFlag = false;
 
-	    // print frequency error
-	    Serial.print(F("[SX1262] Frequency error:\t"));
-	    Serial.print(radio.getFrequencyError());
-	    Serial.println(F(" Hz"));
-		display.display();
+			uint8_t inBuf[64];
+			int len = radio.getPacketLength();
 
-	  } else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
-	    // packet was received, but is malformed
-	    Serial.println(F("CRC error!"));
+			int state = radio.readData(inBuf, len);
+			showRX = 1; 
 
-	  } else {
-	    // some other error occurred
-	    Serial.print(F("failed, code "));
-	    Serial.println(state);
+			// you can also read received data as byte array
+			//byte byteArr[8];
+			//int numBytes = radio.getPacketLength();
+			//int state = radio.readData(byteArr, numBytes);
 
-	  }
-	}
+			if (state == RADIOLIB_ERR_NONE) {
+				float rxLat, rxLng;
+				uint8_t rxNode;
+
+				parsePacket(inBuf, rxLat, rxLng, rxNode);
+				if (showRX == 1) {
+					Serial.print("RX from node ");
+					Serial.print(rxNode);
+					Serial.print(" Lat=");
+					Serial.print(rxLat, 6);
+					Serial.print(" Lng=");
+					Serial.println(rxLng, 6);
+
+					// OLED update
+					display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+					display.setCursor(0, 40);
+					display.print("RX ");
+					display.print(rxNode);
+					display.print(": ");
+					display.print(rxLat, 4);
+					display.print(",");
+					display.print(rxLng, 4);
+					display.display();
+
+					// RF diagnostics
+					Serial.print("RSSI: ");
+					Serial.println(radio.getRSSI());
+					Serial.print("SNR: ");
+					Serial.println(radio.getSNR());
+				}
+
+			} else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
+				// packet was received, but is malformed
+				Serial.println(F("CRC error!"));
+
+			} else {
+				// some other error occurred
+				Serial.print(F("failed, code "));
+				Serial.println(state);
+
+			}
+		}
+	#endif
+
 }
 
 // Convert bytes to ASCII-safe String
