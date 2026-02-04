@@ -7,6 +7,7 @@
 #include <SPI.h>
 #include <cstdio>
 #include "gpsPacket.h"
+#include "node_identity.h"
 
 // Definitions
 #define LED (0 + 15)
@@ -51,6 +52,19 @@ void setFlag(void) {
 }
 
 void setup(){
+	Serial.begin(115200);
+	delay(50);
+
+	NodeIdentity::initNodeIdentity();
+	const uint8_t* mac = NodeIdentity::getNodeMac();
+	Serial.printf(
+	  "[Node] name=%s id=0x%02X role=%s mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+	  NodeIdentity::getNodeName(),
+	  NodeIdentity::getNodeId(),
+	  NodeIdentity::isHeadNode() ? "HEAD" : "FIELD",
+	  mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]
+	);
+
 	pinMode(LED, OUTPUT); //set output mode
 	digitalWrite(LED, LOW);
 	
@@ -126,6 +140,11 @@ void setup(){
 	display.print("Date: NONE");
 	display.setCursor(0, 30);
 	display.print("no message recv");
+	display.setCursor(0, 50);
+	display.print(NodeIdentity::getNodeName());
+	if (NodeIdentity::isHeadNode()) {
+	  display.print(" H");
+	}
 	display.display();
 }
 

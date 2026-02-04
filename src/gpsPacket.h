@@ -1,5 +1,6 @@
 #pragma once 
 #include <Arduino.h>
+#include "node_identity.h"
 
 struct GPSPacket {
     uint8_t node_id;
@@ -7,11 +8,9 @@ struct GPSPacket {
     int32_t lon;
 };
 
-static uint8_t NODE_ID = 0x01; // Hardcoded
-
 inline void buildPacket(double latitude, double longitude, uint8_t *buffer) {
     GPSPacket packet;
-    packet.node_id = NODE_ID;
+    packet.node_id = NodeIdentity::getNodeId();
     packet.lat = (int32_t)(latitude * 1e6);
     packet.lon = (int32_t)(longitude * 1e6);
     memcpy(buffer, &packet, sizeof(packet));
