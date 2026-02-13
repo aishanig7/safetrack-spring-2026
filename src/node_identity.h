@@ -83,4 +83,4 @@ inline bool isHeadNode() {
   return (IS_HEAD_NODE != 0);
 }
 
-} // namespace NodeIdentity
+}

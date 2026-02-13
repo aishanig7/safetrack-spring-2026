@@ -143,7 +143,7 @@ void setup(){
 	display.setCursor(0, 50);
 	display.print(NodeIdentity::getNodeName());
 	if (NodeIdentity::isHeadNode()) {
-	  display.print(" H");
+	  display.print(" HEAD-NODE");
 	}
 	display.display();
 }
@@ -229,7 +229,7 @@ void loop() {
 		display.display();
 		char charStr[16];
 		str.toCharArray(charStr, sizeof(charStr));
-		snprintf(recvBuffer, sizeof(recvBuffer), "%s", &charStr);
+		snprintf(recvBuffer, sizeof(recvBuffer), "%s", charStr);
         display.setCursor(0, 30); // curosr pos for lora stuff
         display.print(recvBuffer);
 
