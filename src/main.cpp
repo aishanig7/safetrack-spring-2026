@@ -140,7 +140,8 @@ void loop() {
         updateBatteryDisplay();
     }
     feedGPSParser();
-
+    
+    //use both at the same time
     #ifdef ROLE_TX
     handleGPSLocation();
     handleDateUpdate();
