@@ -70,7 +70,7 @@ void setFlag(void);
 void feedGPSParser();
 void handleBatteryUpdate();
 void updateBatteryDisplay();
-void drawBatteryIcon(int x, int y, float percent);
+// void drawBatteryIcon(int x, int y, float percent);
 void buttonPushed();
 void handleGPSLocation();
 void handleDateUpdate();
@@ -152,9 +152,9 @@ void loop() {
     if (battery.hasChanged(1.0)) {
         updateBatteryDisplay();
     }
-    feedGPSParser();
 
     if (currentMode == RX_MODE) {
+        feedGPSParser();
         if (gps.location.isUpdated()) {
             handleGPSLocation();
         }
@@ -180,12 +180,6 @@ void loop() {
 }
 
 // ============= COMMON FUNCTIONS =============
-void feedGPSParser() {
-    while (GPS_SERIAL.available() > 0) {
-        gps.encode(GPS_SERIAL.read());
-    }
-}
-
 void updateBatteryDisplay() {
     float batteryPercent = battery.getPercentage();
     
@@ -258,6 +252,12 @@ void buttonPushed() {
 }
 
 // ============= RX FUNCTIONS =============
+void feedGPSParser() {
+    while (GPS_SERIAL.available() > 0) {
+        gps.encode(GPS_SERIAL.read());
+    }
+}
+
 void handleGPSLocation() {
     double lat = gps.location.lat();
     double lng = gps.location.lng();
