@@ -6,6 +6,8 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include "gpsPacket.h"
+#include "meshPacket.h"
+#include "nodeIdentity.h"
 #include "battery.h"
 
 // ============= PIN DEFINITIONS =============
@@ -22,8 +24,13 @@
 #define SX126X_RXEN    (0 + 17)
 #define SX126X_TXEN    RADIOLIB_NC
 
+#define BUTTON_PIN (0 + 32)
+
 // ============= ROLE SELECTION =============
-#define ROLE_TX
+enum NodeState { RX_MODE, TX_MODE };
+NodeState currentMode = RX_MODE;
+
+// #define ROLE_TX
 // #define ROLE_RX
 
 // ============= BATTERY CONFIGURATION =============
@@ -49,6 +56,14 @@ char latBuffer[30], lngBuffer[30], dateBuffer[30];
 double lastLat = 0, lastLng = 0;
 TinyGPSDate lastDate;
 volatile bool receivedFlag = false;
+volatile bool shouldTransmit = false;
+
+// button state variables
+int buttonState = 0;
+int lastButtonState = 0;
+
+// node id
+uint8_t selfId = 0;
 
 // ============= FUNCTION DECLARATIONS =============
 void setFlag(void);
@@ -56,16 +71,10 @@ void feedGPSParser();
 void handleBatteryUpdate();
 void updateBatteryDisplay();
 void drawBatteryIcon(int x, int y, float percent);
-
-#ifdef ROLE_TX
+void buttonPushed();
 void handleGPSLocation();
 void handleDateUpdate();
-#endif
-
-#ifdef ROLE_RX
-void handleRadioReceive();
-#endif
-
+void displayRadioReceived();
 String bytesToAscii(const uint8_t *buf, size_t len);
 
 // ============= ISR =============
@@ -77,6 +86,7 @@ void setFlag() {
 void setup() {
     Serial.begin(115200);
     pinMode(LED, OUTPUT);
+    pinMode(BUTTON_PIN, INPUT);
     digitalWrite(LED, LOW);
 
     // GPS init
@@ -131,6 +141,9 @@ void setup() {
     delay(1000);
     display.clearDisplay();
     display.display();
+
+    // nodeID
+    selfId = NodeIdentity::getNodeId();
 }
 
 // ============= MAIN LOOP =============
@@ -140,16 +153,30 @@ void loop() {
         updateBatteryDisplay();
     }
     feedGPSParser();
-    
-    //use both at the same time
-    #ifdef ROLE_TX
-    handleGPSLocation();
-    handleDateUpdate();
-    #endif
 
-    #ifdef ROLE_RX
-    handleRadioReceive();
-    #endif
+    if (currentMode == RX_MODE) {
+        if (gps.location.isUpdated()) {
+            handleGPSLocation();
+        }
+        if (gps.date.isUpdated()) {
+            handleDateUpdate();
+        }
+        if (receivedFlag) {
+            receivedFlag = false;
+            displayRadioReceived(); // maybe call this later? transmit first vs display firsy
+            shouldTransmit = true; // check : 1. is this a head node? 2. should this be forwarded?
+        }
+        if (shouldTransmit) {
+            currentMode = TX_MODE;
+        }
+
+    } else if (currentMode == TX_MODE) {
+        buttonState = digitalRead(BUTTON_PIN);
+        if (buttonState != lastButtonState) {
+            buttonPushed();
+        }
+        currentMode = RX_MODE; // end of TX, back to RX
+    }
 }
 
 // ============= COMMON FUNCTIONS =============
@@ -158,12 +185,6 @@ void feedGPSParser() {
         gps.encode(GPS_SERIAL.read());
     }
 }
-
-// void handleBatteryUpdate() {
-//     if (battery.hasChanged(1.0)) {
-//         updateBatteryDisplay();
-//     }
-// }
 
 void updateBatteryDisplay() {
     float batteryPercent = battery.getPercentage();
@@ -209,13 +230,35 @@ String bytesToAscii(const uint8_t *buf, size_t len) {
 }
 
 // ============= TX FUNCTIONS =============
-#ifdef ROLE_TX
+void buttonPushed() {
+    if (buttonState == 0) {
+    Serial.println("Button Pressed Once!");
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.print("TX: Node Ready");
+    display.display();
 
-void handleGPSLocation() {
-    if (!gps.location.isUpdated()) {
-        return;
+    static uint16_t seqCounter = 0;
+
+    MeshPacket pkt = {};
+    pkt.src = selfId;
+    pkt.lastHop = selfId;
+    pkt.dst = MESH_BROADCAST;
+    pkt.ttl = 5;
+    pkt.seq = seqCounter++;
+    pkt.type = PKT_GPS;
+
+    buildPacket(45.8239, -112.5641, pkt.payload);
+
+    radio.standby();
+    radio.transmit((uint8_t *)&pkt, sizeof(MeshPacket));
+    radio.startReceive();
     }
+    lastButtonState = buttonState;
+}
 
+// ============= RX FUNCTIONS =============
+void handleGPSLocation() {
     double lat = gps.location.lat();
     double lng = gps.location.lng();
     bool redraw = false;
@@ -278,18 +321,7 @@ void handleDateUpdate() {
     }
 }
 
-#endif
-
-// ============= ANOTHER RX FUNCTIONS =============
-#ifdef ROLE_RX
-
-void handleRadioReceive() {
-    if (!receivedFlag) {
-        return;
-    }
-
-    receivedFlag = false;
-
+void displayRadioReceived() {
     uint8_t inBuf[sizeof(GPSPacket)];
     int state = radio.readData(inBuf, sizeof(GPSPacket));
 
@@ -346,5 +378,3 @@ void handleRadioReceive() {
     // Re-enable RX mode
     radio.startReceive();
 }
-
-#endif
