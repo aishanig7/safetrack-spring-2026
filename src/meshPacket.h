@@ -1,13 +1,9 @@
 #pragma once
+#include <stdint.h>
 
-#include <Arduino.h>
-
-constexpr uint8_t MESH_BROADCAST = 0xFF;
-
-enum MeshPacketType : uint8_t {
-  PKT_GPS = 1,
-  PKT_HELLO = 2,
-};
+#define PKT_GPS  2
+#define PKT_HELLO 1
+#define MESH_BROADCAST 0xFF
 
 struct MeshPacket {
   uint8_t src;
@@ -18,3 +14,4 @@ struct MeshPacket {
   uint8_t type;
   uint8_t payload[32];
 };
+
