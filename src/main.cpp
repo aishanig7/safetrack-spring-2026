@@ -6,9 +6,11 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <cstdio>
+#include <nrf_wdt.h>
 #include "gpsPacket.h"
 #include "meshPacket.h"
 #include "node_identity.h"
+#include "mesh_crypto.h"
 
 //Hardware and Pins
 #define LED (0 + 15)
@@ -93,6 +95,28 @@ void setFlag(void) {
   receivedFlag = true;
 }
 
+/**
+ * Initialize watchdog timer for tamper detection
+ * Watchdog must be pet regularly or system will reset
+ */
+void initWatchdog() {
+  nrf_wdt_behaviour_set(NRF_WDT_BEHAVIOUR_RUN_SLEEP);
+  nrf_wdt_reload_value_set(10 * 32768);  // 10 seconds
+  nrf_wdt_reload_request_enable(NRF_WDT_RR0);
+  nrf_wdt_task_trigger(NRF_WDT_TASK_START);
+  Serial.println("[SECURITY] Watchdog timer initialized");
+}
+
+/**
+ * Initialize brown-out detection
+ * System will reset if voltage drops below threshold
+ */
+void initBOD() {
+  NRF_POWER->POFCON = (POWER_POFCON_POF_Enabled << POWER_POFCON_POF_Pos) |
+                      (POWER_POFCON_THRESHOLD_V27 << POWER_POFCON_THRESHOLD_Pos);
+  Serial.println("[SECURITY] Brown-out detection enabled");
+}
+
 void readGPS() {
     while (gpsSerial.available() > 0) {
         gps.encode(gpsSerial.read());
@@ -153,11 +177,18 @@ void sendHello() {
 		// optional: fill payload[0..3] with millis() timestamp
 		// memcpy(pkt.payload, &lastHello, sizeof(lastHello));
 
+		// Encrypt packet before transmission
+		EncryptedMeshPacket encPkt;
+		if (!encryptMeshPacket(&pkt, &encPkt)) {
+			Serial.println("[CRYPTO] Encryption failed in sendHello!");
+			return;
+		}
+
 		radio.standby();
-		radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+		radio.transmit((uint8_t*)&encPkt, sizeof(EncryptedMeshPacket));
 		radio.startReceive();
 
-		Serial.println("HELLO sent");
+		Serial.println("HELLO sent (encrypted)");
 	}
 }
 
@@ -240,8 +271,15 @@ void handleTX() {
 
 			buildPacket(33.4152, 111.9283, pkt.payload);
 
+			// Encrypt packet before transmission
+			EncryptedMeshPacket encPkt;
+			if (!encryptMeshPacket(&pkt, &encPkt)) {
+				Serial.println("[CRYPTO] Encryption failed in handleTX!");
+				return;
+			}
+
 			radio.standby();
-			radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+			radio.transmit((uint8_t*)&encPkt, sizeof(EncryptedMeshPacket));
 			radio.startReceive();
 		}
 	lastButtonState = buttonState;
@@ -256,50 +294,59 @@ void handleRX() {
 		int len = radio.getPacketLength();
 
 		int state = radio.readData(inBuf, len);
-		if (state != RADIOLIB_ERR_NONE) {
+		if (state != RADIOLIB_ERR_NONE || len != sizeof(EncryptedMeshPacket)) {
 			radio.startReceive();
 			return;
 		}
 
-		// interpret as mesh packet
-		MeshPacket *pkt = (MeshPacket*)inBuf;
-		if (pkt->src == NODE_ID) {
+		// Cast to encrypted packet and decrypt
+		EncryptedMeshPacket *encPkt = (EncryptedMeshPacket*)inBuf;
+		MeshPacket pkt;
+
+		if (!decryptMeshPacket(encPkt, &pkt)) {
+			Serial.println("[CRYPTO] Decryption failed");
+			radio.startReceive();
+			return;
+		}
+
+		// Check if packet is from self
+		if (pkt.src == NODE_ID) {
 			radio.startReceive();
 			return;
 		}
 
 		// duplicate check
-		if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
+		if (pkt.type != PKT_HELLO && seenBefore(pkt.src, pkt.seq)) {
 			Serial.println("Duplicate packet dropped");
 			radio.startReceive();
 			return;
 		}
 
-		// HELLO packet handling 
-		if (pkt->type == PKT_HELLO) {
-			updateNeighbors(pkt);
+		// HELLO packet handling
+		if (pkt.type == PKT_HELLO) {
+			updateNeighbors(&pkt);
 		}
 
 		//GPS packet handling
-		if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
+		if (pkt.type == PKT_GPS && pkt.dst == NODE_ID) {
 			float rxLat, rxLng;
 			uint8_t rxNode;
-			parsePacket(pkt->payload, rxLat, rxLng, rxNode);
+			parsePacket(pkt.payload, rxLat, rxLng, rxNode);
 
 			Serial.print("RX from node ");
-			Serial.print(pkt->src);
+			Serial.print(pkt.src);
 			//Serial.print(" Lat=");
-			Serial.print(NODE_ID); 
-			Serial.print(" "); 
+			Serial.print(NODE_ID);
+			Serial.print(" ");
 			Serial.println(rxLng, 6);
-			Serial.print(" "); 
+			Serial.print(" ");
 			Serial.print(rxLat, 6);
 			//Serial.print(" Lng=");
 
 			display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
 			display.setCursor(0, 40);
 			display.print("RX ");
-			display.print(pkt->src);
+			display.print(pkt.src);
 			display.print(": ");
 			display.print(rxLat, 4);
 			display.print(",");
@@ -311,29 +358,38 @@ void handleRX() {
 		}
 
 		//  forward packet
-		if (pkt->ttl > 0 && pkt->dst != NODE_ID) {
+		if (pkt.ttl > 0 && pkt.dst != NODE_ID) {
 			uint8_t nextHop = MESH_BROADCAST;
 
 			for (int i = 0; i < MAX_ROUTES; i++) {
-				if (routes[i].dest == pkt->dst) {
+				if (routes[i].dest == pkt.dst) {
 					nextHop = routes[i].nextHop;
 					break;
 				}
 			}
 			display.setCursor(0, 50);
 			display.print("FWD: ");
-			display.print(pkt->dst);
+			display.print(pkt.dst);
 			display.display();
 
-			pkt->ttl--;
-			pkt->lastHop = NODE_ID;
+			// Update routing fields
+			pkt.ttl--;
+			pkt.lastHop = NODE_ID;
 
 			if (nextHop != MESH_BROADCAST) {
-				pkt->dst = nextHop;
+				pkt.dst = nextHop;
+			}
+
+			// Re-encrypt with updated headers
+			EncryptedMeshPacket fwdPkt;
+			if (!encryptMeshPacket(&pkt, &fwdPkt)) {
+				Serial.println("[CRYPTO] Re-encryption failed");
+				radio.startReceive();
+				return;
 			}
 
 			delay(random(40, 200));
-			radio.transmit((uint8_t*)pkt, len);
+			radio.transmit((uint8_t*)&fwdPkt, sizeof(EncryptedMeshPacket));
 		}
 
 		// go back to receive mode
@@ -360,6 +416,27 @@ void setup() {
   pinMode(LED, OUTPUT);
   pinMode(BUTTON_PIN, INPUT);
   digitalWrite(LED, LOW);
+
+  // Initialize crypto system
+  if (!initCrypto()) {
+    Serial.println("[CRYPTO] Initialization failed!");
+    digitalWrite(LED, HIGH);
+    while (true) { delay(1000); }
+  }
+
+  // Run crypto self-tests
+  if (!testCrypto()) {
+    Serial.println("[CRYPTO] Self-tests failed!");
+    digitalWrite(LED, HIGH);
+    while (true) { delay(1000); }
+  }
+
+  // Measure crypto performance
+  measureCryptoLatency();
+
+  // Initialize security features
+  initBOD();
+  initWatchdog();
 
 	for(int i = 0; i < MAX_NEIGHBORS; i++){
         neighbors[i].nodeID = 0;
@@ -445,6 +522,9 @@ void setup() {
 
 void loop() {
   static unsigned long lastStatusPrint = 0;
+
+  // Pet watchdog to prevent reset
+  nrf_wdt_reload_request_set(NRF_WDT_RR0);
 
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
@@ -557,11 +637,18 @@ void loop() {
 		// optional: fill payload[0..3] with millis() timestamp
 		// memcpy(pkt.payload, &lastHello, sizeof(lastHello));
 
+		// Encrypt packet before transmission
+		EncryptedMeshPacket encPkt;
+		if (!encryptMeshPacket(&pkt, &encPkt)) {
+			Serial.println("[CRYPTO] Encryption failed in loop HELLO!");
+			return;
+		}
+
 		radio.standby();
-		radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+		radio.transmit((uint8_t*)&encPkt, sizeof(EncryptedMeshPacket));
 		radio.startReceive();
 
-		Serial.println("HELLO sent");
+		Serial.println("HELLO sent (encrypted)");
 	}
 
 	Serial.println("Current neighbors:");
@@ -598,8 +685,15 @@ void loop() {
 
 				buildPacket(45.8239, -112.5641, pkt.payload);
 
+				// Encrypt packet before transmission
+				EncryptedMeshPacket encPkt;
+				if (!encryptMeshPacket(&pkt, &encPkt)) {
+					Serial.println("[CRYPTO] Encryption failed in loop TX!");
+					return;
+				}
+
 				radio.standby();
-				radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+				radio.transmit((uint8_t*)&encPkt, sizeof(EncryptedMeshPacket));
 				radio.startReceive();
 			}
 		lastButtonState = buttonState;
@@ -616,26 +710,33 @@ void loop() {
 			int len = radio.getPacketLength();
 
 			int state = radio.readData(inBuf, len);
-			if (state != RADIOLIB_ERR_NONE) {
+			if (state != RADIOLIB_ERR_NONE || len != sizeof(EncryptedMeshPacket)) {
 				radio.startReceive();
 				return;
 			}
 
-			// interpret as mesh packet
-			MeshPacket *pkt = (MeshPacket*)inBuf;
+			// Cast to encrypted packet and decrypt
+			EncryptedMeshPacket *encPkt = (EncryptedMeshPacket*)inBuf;
+			MeshPacket pkt;
+
+			if (!decryptMeshPacket(encPkt, &pkt)) {
+				Serial.println("[CRYPTO] Decryption failed");
+				radio.startReceive();
+				return;
+			}
 
 			// duplicate check
-			if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
+			if (pkt.type != PKT_HELLO && seenBefore(pkt.src, pkt.seq)) {
 				Serial.println("Duplicate packet dropped");
 				radio.startReceive();
 				return;
 			}
 
-			// HELLO packet handling 
-			if (pkt->type == PKT_HELLO) {
+			// HELLO packet handling
+			if (pkt.type == PKT_HELLO) {
 				bool found = false;
 				for (int i = 0; i < MAX_NEIGHBORS; i++) {
-					if (neighbors[i].nodeID == pkt->src) {
+					if (neighbors[i].nodeID == pkt.src) {
 						neighbors[i].lastSeen = millis();
 						found = true;
 						break;
@@ -644,24 +745,24 @@ void loop() {
 				if (!found) {
 					for (int i = 0; i < MAX_NEIGHBORS; i++) {
 						if (neighbors[i].nodeID == 0) {
-							neighbors[i].nodeID = pkt->src;
+							neighbors[i].nodeID = pkt.src;
 							neighbors[i].lastSeen = millis();
 							break;
 						}
 					}
 				}
 				Serial.print("Neighbor updated: ");
-				Serial.println(pkt->src);
+				Serial.println(pkt.src);
 			}
 
 			//GPS packet handling
-			if (pkt->type == PKT_GPS && (pkt->dst == NODE_ID || pkt->dst == MESH_BROADCAST)) {
+			if (pkt.type == PKT_GPS && (pkt.dst == NODE_ID || pkt.dst == MESH_BROADCAST)) {
 				float rxLat, rxLng;
 				uint8_t rxNode;
-				parsePacket(pkt->payload, rxLat, rxLng, rxNode);
+				parsePacket(pkt.payload, rxLat, rxLng, rxNode);
 
 				Serial.print("RX from node ");
-				Serial.print(pkt->src);
+				Serial.print(pkt.src);
 				Serial.print(" Lat=");
 				Serial.print(rxLat, 6);
 				Serial.print(" Lng=");
@@ -670,7 +771,7 @@ void loop() {
 				display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
 				display.setCursor(0, 40);
 				display.print("RX ");
-				display.print(pkt->src);
+				display.print(pkt.src);
 				display.print(": ");
 				display.print(rxLat, 4);
 				display.print(",");
@@ -682,12 +783,20 @@ void loop() {
 			}
 
 			//  forward packet
-			if (pkt->ttl > 0 && pkt->dst != NODE_ID) {
-				pkt->ttl--;
-				pkt->lastHop = NODE_ID;
+			if (pkt.ttl > 0 && pkt.dst != NODE_ID) {
+				pkt.ttl--;
+				pkt.lastHop = NODE_ID;
+
+				// Re-encrypt with updated headers
+				EncryptedMeshPacket fwdPkt;
+				if (!encryptMeshPacket(&pkt, &fwdPkt)) {
+					Serial.println("[CRYPTO] Re-encryption failed in loop RX");
+					radio.startReceive();
+					return;
+				}
 
 				delay(random(40, 200)); // small random delay to avoid collisions
-				radio.transmit((uint8_t*)pkt, len);
+				radio.transmit((uint8_t*)&fwdPkt, sizeof(EncryptedMeshPacket));
 			}
 
 			// go back to receive mode

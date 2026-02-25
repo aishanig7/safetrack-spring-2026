@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "WebSearch",
+      "Bash(pio run:*)",
+      "Bash(platformio run:*)",
+      "Bash(where:*)"
+    ]
+  }
+}

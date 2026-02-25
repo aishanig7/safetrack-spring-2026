@@ -3,3 +3,9 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Local docs
+QUICK_REFERENCE.md
+TESTING_GUIDE.md
+CRYPTO_IMPLEMENTATION.md
+parts_info.md
