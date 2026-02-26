@@ -5,7 +5,11 @@
       "WebSearch",
       "Bash(pio run:*)",
       "Bash(platformio run:*)",
-      "Bash(where:*)"
+      "Bash(where:*)",
+      "Bash(dir:*)",
+      "WebFetch(domain:registry.platformio.org)",
+      "Bash(pio lib install:*)",
+      "Bash(platformio lib install:*)"
     ]
   }
 }

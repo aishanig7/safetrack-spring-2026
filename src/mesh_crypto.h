@@ -2,15 +2,19 @@
 #define MESH_CRYPTO_H
 
 #include <Arduino.h>
-#include <mbedtls/ccm.h>
+#include <Adafruit_nRFCrypto.h>
+
+// Include Nordic CC310 AES-CCM headers directly
+extern "C" {
+  #include "nrf_cc310/include/crys_aesccm.h"
+  #include "nrf_cc310/include/crys_aesccm_error.h"
+}
+
 #include "meshPacket.h"
 #include "crypto_config.h"
 
 // Global packet counter for nonce generation
 static uint64_t g_packetCounter = 0;
-
-// CCM context for encryption/decryption
-static mbedtls_ccm_context g_ccm_ctx;
 static bool g_crypto_initialized = false;
 
 /**
@@ -22,17 +26,11 @@ bool initCrypto() {
     return true;
   }
 
-  mbedtls_ccm_init(&g_ccm_ctx);
-
-  int ret = mbedtls_ccm_setkey(&g_ccm_ctx, MBEDTLS_CIPHER_ID_AES, NETWORK_KEY, 128);
-  if (ret != 0) {
-    Serial.print("[CRYPTO] Failed to set key: ");
-    Serial.println(ret);
-    return false;
-  }
+  // Initialize nRF crypto library (enables CC310 hardware acceleration)
+  nRFCrypto.begin();
 
   g_crypto_initialized = true;
-  Serial.println("[CRYPTO] Initialized successfully");
+  Serial.println("[CRYPTO] Nordic CC310 initialized successfully");
   return true;
 }
 
@@ -51,7 +49,7 @@ void buildNonce(uint8_t nodeId, uint8_t nonce[7]) {
 }
 
 /**
- * Encrypt a mesh packet using AES-CCM
+ * Encrypt a mesh packet using AES-CCM with Nordic CC310 hardware acceleration
  *
  * @param plain Plaintext packet to encrypt
  * @param encrypted Output encrypted packet
@@ -84,22 +82,34 @@ bool encryptMeshPacket(const MeshPacket* plain, EncryptedMeshPacket* encrypted) 
   aad[5] = plain->seq & 0xFF;         // seq low byte
   aad[6] = plain->type;
 
-  // Encrypt payload and generate authentication tag
-  int ret = mbedtls_ccm_encrypt_and_tag(
-    &g_ccm_ctx,
-    32,                      // Payload length
-    encrypted->nonce, 7,     // Nonce
-    aad, 7,                  // AAD
-    plain->payload,          // Plaintext input
+  // Prepare MAC result buffer
+  CRYS_AESCCM_Mac_Res_t mac_result;
+
+  // Encrypt using Nordic CC310 AES-CCM (all-in-one function)
+  CRYSError_t ret = CC_AESCCM(
+    SASI_AES_ENCRYPT,              // Encrypt mode
+    (uint8_t*)NETWORK_KEY,         // AES key (cast to non-const)
+    CRYS_AES_Key128BitSize,        // 128-bit key
+    encrypted->nonce,              // Nonce
+    7,                             // Nonce size (7 bytes)
+    aad,                           // Additional authenticated data
+    7,                             // AAD size
+    (uint8_t*)plain->payload,      // Plaintext input
+    32,                            // Plaintext size
     encrypted->encrypted_payload,  // Ciphertext output
-    encrypted->tag, 4        // Authentication tag
+    4,                             // Tag size (4 bytes)
+    mac_result,                    // MAC/tag output
+    CRYS_AESCCM_MODE_CCM           // CCM mode (not CCM*)
   );
 
-  if (ret != 0) {
-    Serial.print("[CRYPTO] Encryption failed: ");
-    Serial.println(ret);
+  if (ret != CRYS_OK) {
+    Serial.print("[CRYPTO] Encryption failed: 0x");
+    Serial.println(ret, HEX);
     return false;
   }
+
+  // Copy tag (first 4 bytes of MAC result)
+  memcpy(encrypted->tag, mac_result, 4);
 
   return true;
 }
@@ -135,20 +145,30 @@ bool decryptMeshPacket(const EncryptedMeshPacket* encrypted, MeshPacket* plain) 
   aad[5] = encrypted->seq & 0xFF;
   aad[6] = encrypted->type;
 
-  // Decrypt payload and verify authentication tag
-  int ret = mbedtls_ccm_auth_decrypt(
-    &g_ccm_ctx,
-    32,                      // Payload length
-    encrypted->nonce, 7,     // Nonce
-    aad, 7,                  // AAD
-    encrypted->encrypted_payload,  // Ciphertext input
-    plain->payload,          // Plaintext output
-    encrypted->tag, 4        // Authentication tag
+  // Prepare MAC buffer with the tag from encrypted packet
+  CRYS_AESCCM_Mac_Res_t mac_result;
+  memcpy(mac_result, encrypted->tag, 4);
+
+  // Decrypt using Nordic CC310 AES-CCM (all-in-one function)
+  CRYSError_t ret = CC_AESCCM(
+    SASI_AES_DECRYPT,                   // Decrypt mode
+    (uint8_t*)NETWORK_KEY,              // AES key (cast to non-const)
+    CRYS_AES_Key128BitSize,             // 128-bit key
+    (uint8_t*)encrypted->nonce,         // Nonce
+    7,                                  // Nonce size (7 bytes)
+    aad,                                // Additional authenticated data
+    7,                                  // AAD size
+    (uint8_t*)encrypted->encrypted_payload,  // Ciphertext input
+    32,                                 // Ciphertext size
+    plain->payload,                     // Plaintext output
+    4,                                  // Tag size (4 bytes)
+    mac_result,                         // MAC/tag for verification
+    CRYS_AESCCM_MODE_CCM                // CCM mode (not CCM*)
   );
 
-  if (ret != 0) {
-    Serial.print("[CRYPTO] Decryption failed: ");
-    Serial.println(ret);
+  if (ret != CRYS_OK) {
+    Serial.print("[CRYPTO] Decryption/auth failed: 0x");
+    Serial.println(ret, HEX);
     return false;
   }
 
@@ -262,7 +282,7 @@ bool testCrypto() {
  */
 void cleanupCrypto() {
   if (g_crypto_initialized) {
-    mbedtls_ccm_free(&g_ccm_ctx);
+    nRFCrypto.end();
     g_crypto_initialized = false;
   }
 }

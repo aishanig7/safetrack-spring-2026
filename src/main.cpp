@@ -100,10 +100,10 @@ void setFlag(void) {
  * Watchdog must be pet regularly or system will reset
  */
 void initWatchdog() {
-  nrf_wdt_behaviour_set(NRF_WDT_BEHAVIOUR_RUN_SLEEP);
-  nrf_wdt_reload_value_set(10 * 32768);  // 10 seconds
-  nrf_wdt_reload_request_enable(NRF_WDT_RR0);
-  nrf_wdt_task_trigger(NRF_WDT_TASK_START);
+  nrf_wdt_behaviour_set(NRF_WDT, NRF_WDT_BEHAVIOUR_RUN_SLEEP);
+  nrf_wdt_reload_value_set(NRF_WDT, 10 * 32768);  // 10 seconds
+  nrf_wdt_reload_request_enable(NRF_WDT, NRF_WDT_RR0);
+  nrf_wdt_task_trigger(NRF_WDT, NRF_WDT_TASK_START);
   Serial.println("[SECURITY] Watchdog timer initialized");
 }
 
@@ -434,6 +434,13 @@ void setup() {
   // Measure crypto performance
   measureCryptoLatency();
 
+  // Pause so crypto test results are visible in serial monitor
+  Serial.println("\n========================================");
+  Serial.println("   CRYPTO TESTS COMPLETE - SUCCESS!");
+  Serial.println("========================================");
+  Serial.println("Waiting 5 seconds before starting main loop...\n");
+  delay(5000);  // 5 second pause to read crypto results
+
   // Initialize security features
   initBOD();
   initWatchdog();
@@ -524,7 +531,7 @@ void loop() {
   static unsigned long lastStatusPrint = 0;
 
   // Pet watchdog to prevent reset
-  nrf_wdt_reload_request_set(NRF_WDT_RR0);
+  nrf_wdt_reload_request_set(NRF_WDT, NRF_WDT_RR0);
 
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
