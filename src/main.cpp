@@ -16,10 +16,13 @@
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
 
+int32_t counter = 0; 
+
 // Node and Mesh
 //#define NODE_ID 1
-//#define NODE_ID 2
-#define NODE_ID 3
+#define NODE_ID 2
+//#define NODE_ID 3
+
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
 #define MAX_ROUTES 10
@@ -99,28 +102,23 @@ void setFlag(void) {
 }
 
 void readGPS() {
-    while (gpsSerial.available() > 0) {
-        gps.encode(gpsSerial.read());
-    }
 
-    if (gps.location.isUpdated()) {
-        double lat = gps.location.lat();
-        double lng = gps.location.lng();
+    double lat = gps.location.lat();
+    double lng = gps.location.lng();
 
-        if (lat != lastLat || lng != lastLng) {
-            lastLat = lat;
-            lastLng = lng;
+    if (lat != lastLat || lng != lastLng) {
+        lastLat = lat;
+        lastLng = lng;
 
-            display.setCursor(0, 0);
-            display.print("Lat: ");
-            display.print(lat, 6);
+        display.setCursor(0, 0);
+        display.print("Lat: ");
+        display.print(lat, 6);
 
-            display.setCursor(0, 10);
-            display.print("Lng: ");
-            display.print(lng, 6);
+        display.setCursor(0, 10);
+        display.print("Lng: ");
+        display.print(lng, 6);
 
-            display.display();
-        }
+        display.display();
     }
 }
 
@@ -133,7 +131,7 @@ bool seenBefore(uint8_t src, uint16_t seq) {
     }
   }
 
-  // not seen → store it (circular buffer)
+  // not seen then store it (circular buffer)
   seenCache[seenIndex].src = src;
   seenCache[seenIndex].seq = seq;
   seenIndex = (seenIndex + 1) % DUP_CACHE_SIZE;
@@ -202,154 +200,182 @@ void updateNeighbors(MeshPacket* pkt) {
     	}
 	}
 }
+uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
+	    // Look in routing table first
+    for (int i = 0; i < MAX_ROUTES; i++) {
+        if (routes[i].dest == finalDest && routes[i].nextHop != 0) {
+            return routes[i].nextHop;
+        }
+    }
+	/*
+	for (int i = 0; i < MAX_NEIGHBORS; i++) {
+		if (neighbors[i].nodeID == 2) {
+			return 2;
+		}
+	}
+	*/
+
+    // fallback: pick any neighbor (for simple test)
+    for (int i = 0; i < MAX_NEIGHBORS; i++) {
+        if (neighbors[i].nodeID != 0 && neighbors[i].nodeID != NODE_ID) {
+            return neighbors[i].nodeID;
+        }
+    }
+
+    // fallback
+    return 0;  // 0 = invalid nextHop, don’t broadcast
+}
+
 
 void handleTX() {
 	buttonState = digitalRead(BUTTON_PIN);
-	if (buttonState != lastButtonState) {
-		if (buttonState == LOW) {
-			Serial.println("Button Pressed Once!");
-			display.clearDisplay();  
-			display.setCursor(0,0); 
-			display.print("TX: Node Ready"); 
-			display.display(); 
+    if (buttonState != lastButtonState) {
+        if (buttonState == LOW && NODE_ID == 1) {
+            Serial.println("Button Pressed Once!");
+            display.setCursor(0,40); 
+            display.print("TX: Packet sent"); 
+            display.display(); 
 
-			static uint16_t seqCounter = 0;
+            static uint16_t seqCounter = 0;
 
-			MeshPacket pkt = {};
-			pkt.src = NODE_ID;
-			pkt.lastHop = NODE_ID;
+            MeshPacket pkt = {};
+            pkt.src = NODE_ID;
+            pkt.lastHop = NODE_ID;
+            
+            uint8_t targetNode = 3;   // the ultimate destination for your test
+            pkt.dst = targetNode;      // MUST be set to the final destination
+            pkt.ttl = 5;
+            pkt.seq = seqCounter++;
+            pkt.type = PKT_GPS;
+
+            buildPacket(counter, 1, pkt.payload);
+			counter++; 
+			Serial.print(counter); 
 			
-			uint8_t targetNode = 1;   // change per test
-			uint8_t nextHop = targetNode;
 
-			// If target not neighbor, lookup route
-			bool isNeighbor = false;
-			for (int i = 0; i < MAX_NEIGHBORS; i++) {
-				if (neighbors[i].nodeID == targetNode) {
-					isNeighbor = true;
-					break;
-				}
+            // pick a nextHop dynamically
+            uint8_t nextHop = selectNextHop(targetNode, pkt.src);
+
+			if (nextHop != 0) {
+				display.setCursor(0, 50);
+				display.print("FWD: ");
+				display.print(nextHop);
+				display.display();
+			} else {
+				Serial.println("No neighbor to forward to yet!");
+				return;  // don’t send
 			}
 
-			if (!isNeighbor) {
-				for (int i = 0; i < MAX_ROUTES; i++) {
-					if (routes[i].dest == targetNode) {
-						nextHop = routes[i].nextHop;
-						break;
-					}
-				}
-			}
+            display.setCursor(0, 50);
+            display.print("FWD: ");
+            display.print(nextHop);
+            display.display();
 
-			pkt.dst = nextHop;
-
-			pkt.ttl = 5;
-			pkt.seq = seqCounter++;
-			pkt.type = PKT_GPS;
-
-			buildPacket(33.4152, 111.9283, pkt.payload);
-
-			radio.standby();
-			radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-			radio.startReceive();
-		}
-	lastButtonState = buttonState;
-	}
+            delay(random(40, 200));
+            radio.standby();
+            radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+            radio.startReceive();
+        }
+        lastButtonState = buttonState;
+    }
 }
 
 void handleRX() {
 	if (receivedFlag) {
-		receivedFlag = false;
+        receivedFlag = false;
 
-		uint8_t inBuf[64];
-		int len = radio.getPacketLength();
+        uint8_t inBuf[64];
+        int len = radio.getPacketLength();
+        int state = radio.readData(inBuf, len);
+        if (state != RADIOLIB_ERR_NONE) {
+            radio.startReceive();
+            return;
+        }
 
-		int state = radio.readData(inBuf, len);
-		if (state != RADIOLIB_ERR_NONE) {
-			radio.startReceive();
-			return;
-		}
+		float rssi = radio.getRSSI();
+		float snr  = radio.getSNR();
 
-		// interpret as mesh packet
-		MeshPacket *pkt = (MeshPacket*)inBuf;
-		if (pkt->src == NODE_ID) {
-			radio.startReceive();
-			return;
-		}
+		Serial.print("RSSI: ");
+		Serial.println(rssi);
 
-		// duplicate check
-		if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
-			Serial.println("Duplicate packet dropped");
-			radio.startReceive();
-			return;
-		}
+		Serial.print("SNR: ");
+		Serial.println(snr);
 
-		// HELLO packet handling 
-		if (pkt->type == PKT_HELLO) {
-			updateNeighbors(pkt);
-		}
+        MeshPacket *pkt = (MeshPacket*)inBuf;
+        if (pkt->src == NODE_ID) {
+            radio.startReceive();
+            return;
+        }
 
-		//GPS packet handling
-		if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
-			float rxLat, rxLng;
-			uint8_t rxNode;
-			parsePacket(pkt->payload, rxLat, rxLng, rxNode);
+        if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
+            Serial.println("Duplicate packet dropped");
+            radio.startReceive();
+            return;
+        }
 
-			Serial.print("RX from node ");
-			Serial.print(pkt->src);
-			//Serial.print(" Lat=");
-			Serial.print(NODE_ID); 
-			Serial.print(" "); 
-			Serial.println(rxLng, 6);
-			Serial.print(" "); 
-			Serial.print(rxLat, 6);
-			//Serial.print(" Lng=");
+        if (pkt->type == PKT_HELLO) {
+            updateNeighbors(pkt);
+        }
 
-			display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-			display.setCursor(0, 40);
-			display.print("RX ");
-			display.print(pkt->src);
-			display.print(": ");
-			display.print(rxLat, 4);
-			display.print(",");
-			display.print(rxLng, 4);
-			display.display();
+        if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
+            // Packet reached final destination
+            float rxLat, rxLng;
+            uint8_t rxNode;
+            parsePacket(pkt->payload, rxLat, rxLng, rxNode);
 
-			Serial.print("RSSI: "); Serial.println(radio.getRSSI());
-			Serial.print("SNR: "); Serial.println(radio.getSNR());
-		}
+            Serial.print("RX from node ");
+            Serial.println(pkt->src);
 
-		//  forward packet
-		if (pkt->ttl > 0 && pkt->dst != NODE_ID) {
-			uint8_t nextHop = MESH_BROADCAST;
+            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+            display.setCursor(0, 40);
+            display.print("RX ");
+            display.print(pkt->src);
+            display.print(": ");
+            display.print(rxLat, 4);
+            display.print(",");
+            display.print(rxLng, 4);
+			display.setCursor(50, 50);
+			display.print("Last Hop: ");
+			display.print(pkt->lastHop); 
 
-			for (int i = 0; i < MAX_ROUTES; i++) {
-				if (routes[i].dest == pkt->dst) {
-					nextHop = routes[i].nextHop;
-					break;
-				}
-			}
-			display.setCursor(0, 50);
-			display.print("FWD: ");
-			display.print(pkt->dst);
-			display.display();
+			display.setCursor(80,0);
+			display.print("R:");
+			display.print(rssi,0);
 
-			pkt->ttl--;
-			pkt->lastHop = NODE_ID;
+			display.setCursor(80,10); 
+			display.print(" S:");
+			display.print(snr,1);
+            display.display();
+        }
 
-			if (nextHop != MESH_BROADCAST) {
-				pkt->dst = nextHop;
-			}
+        // Forward if not final destination
+        if (pkt->type == PKT_GPS && pkt->ttl > 0 && pkt->dst != NODE_ID) {
+            uint8_t nextHop = selectNextHop(pkt->dst, pkt->src);
 
-			delay(random(40, 200));
-			radio.transmit((uint8_t*)pkt, len);
-		}
+            if (nextHop == MESH_BROADCAST) {
+                Serial.println("No route to destination!");
+                radio.startReceive();
+                return;
+            }
 
-		// go back to receive mode
-		radio.startReceive();
-	}
+            // display forwarding
+            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+            display.setCursor(0, 50);
+            display.print("FWD: ");
+            display.display();
+            pkt->ttl--;
+            pkt->lastHop = NODE_ID;
+
+            delay(random(40, 200));
+            radio.transmit((uint8_t*)pkt, len);
+        }
+
+        radio.startReceive();
+    }
 }
 
 void setup(){
+	delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT);
 	digitalWrite(LED, LOW);
@@ -428,13 +454,14 @@ void setup(){
 	
     display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // White text on black background (for overwr)
 	display.setCursor(0, 0);
-	display.print("Lat: 45.8239");
+	display.print("Lat: NONE");
 	display.setCursor(0, 10);
-	display.print("Lng: -112.5641");
+	display.print("Lng: NONE");
 	display.setCursor(0, 20);
 	display.print("Date: NONE");
 	display.setCursor(0, 30);
-	display.print("no message recv");
+	display.print("Node ID: ");
+	display.print(NODE_ID); 
 	display.display();
 }
 
@@ -446,7 +473,7 @@ void loop() {
         gps.encode(gpsSerial.read());
     }
 
-    bool locationUpdated = gps.location.isUpdated();
+    //bool locationUpdated = gps.location.isUpdated();
     bool dateUpdated = gps.date.isUpdated();
 	sendHello(); 
 
@@ -469,6 +496,7 @@ void loop() {
     }
 
 
+	
 	Serial.println("Current neighbors:");
 	for(int i = 0; i < MAX_NEIGHBORS; i++){
 		if(neighbors[i].nodeID != 0){
@@ -479,6 +507,8 @@ void loop() {
 		}
 	}
 	Serial.println("---");
+	
+	
 	handleRX(); 
 	handleTX(); 
 
