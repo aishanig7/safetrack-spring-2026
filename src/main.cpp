@@ -19,14 +19,14 @@
 int32_t counter = 0; 
 
 // Node and Mesh
-//#define NODE_ID 1
-#define NODE_ID 2
+#define NODE_ID 1
+//#define NODE_ID 2
 //#define NODE_ID 3
 
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
 #define MAX_ROUTES 10
-#define MESH_BROADCAST 0xFF
+//#define MESH_BROADCAST 0xFF
 
 //other definations
 #define gpsSerial Serial1
@@ -140,36 +140,78 @@ bool seenBefore(uint8_t src, uint16_t seq) {
 }
 
 void sendHello() {
-	const unsigned long HELLO_INTERVAL = 15000; // 15s
-	static unsigned long lastHello = 0;
+    const unsigned long HELLO_INTERVAL = 15000;
+    static unsigned long lastHello = 0;
 
-	if (millis() - lastHello > HELLO_INTERVAL) {
-		lastHello = millis();
+    if (millis() - lastHello > HELLO_INTERVAL) {
+        lastHello = millis();
+        static uint16_t seqCounter = 0;
 
-		static uint16_t seqCounter = 0;
+        MeshPacket pkt = {};
+        pkt.src = NODE_ID;
+        pkt.lastHop = NODE_ID;
+        pkt.dst = MESH_BROADCAST;
+        pkt.ttl = 1;
+        pkt.seq = seqCounter++;
+        pkt.type = PKT_HELLO;
 
-		MeshPacket pkt = {};
-		pkt.src = NODE_ID;
-		pkt.lastHop = NODE_ID;
-		pkt.dst = MESH_BROADCAST;
-		pkt.ttl = 1;
-		pkt.seq = seqCounter++;
-		pkt.type = PKT_HELLO;
+        // Build route advertisement
+        HelloPayload advert = {};
+        for (int i = 0; i < MAX_ROUTES; i++) {
+            if (routes[i].dest != 0 && 
+                advert.routeCount < MAX_ADVERT_ROUTES) {
+                advert.routes[advert.routeCount].dest = routes[i].dest;
+                advert.routes[advert.routeCount].hops = routes[i].hops;
+                advert.routeCount++;
+            }
+        }
+        memcpy(pkt.payload, &advert, sizeof(HelloPayload));
 
-		// optional: fill payload[0..3] with millis() timestamp
-		// memcpy(pkt.payload, &lastHello, sizeof(lastHello));
-
-		radio.standby();
-		radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-		radio.startReceive();
-
-		Serial.println("HELLO sent");
-	}
+        radio.standby();
+        radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+        radio.startReceive();
+        Serial.println("HELLO sent");
+    }
+}
+void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops) {
+    // Update if route already exists and new one is better
+    for (int i = 0; i < MAX_ROUTES; i++) {
+        if (routes[i].dest == dest) {
+            if (hops < routes[i].hops) {
+                routes[i].nextHop = nextHop;
+                routes[i].hops = hops;
+                routes[i].lastUpdated = millis();
+                Serial.print("Route updated: dest=");
+                Serial.print(dest);
+                Serial.print(" via=");
+                Serial.print(nextHop);
+                Serial.print(" hops=");
+                Serial.println(hops);
+            }
+            return;
+        }
+    }
+    // New route
+    for (int i = 0; i < MAX_ROUTES; i++) {
+        if (routes[i].dest == 0) {
+            routes[i].dest = dest;
+            routes[i].nextHop = nextHop;
+            routes[i].hops = hops;
+            routes[i].lastUpdated = millis();
+            Serial.print("Route added: dest=");
+            Serial.print(dest);
+            Serial.print(" via=");
+            Serial.print(nextHop);
+            Serial.print(" hops=");
+            Serial.println(hops);
+            return;
+        }
+    }
 }
 
 void updateNeighbors(MeshPacket* pkt) {
-	bool found = false;
-
+    // Update neighbor table (existing logic)
+    bool found = false;
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
         if (neighbors[i].nodeID == pkt->src) {
             neighbors[i].lastSeen = millis();
@@ -177,29 +219,53 @@ void updateNeighbors(MeshPacket* pkt) {
             break;
         }
     }
-
     if (!found) {
         for (int i = 0; i < MAX_NEIGHBORS; i++) {
             if (neighbors[i].nodeID == 0) {
                 neighbors[i].nodeID = pkt->src;
                 neighbors[i].lastSeen = millis();
-                Serial.print("New neighbor added: ");
+                Serial.print("New neighbor: ");
                 Serial.println(pkt->src);
                 break;
             }
         }
     }
 
-	for (int i = 0; i < MAX_ROUTES; i++) {
-		if (routes[i].dest == 0 || routes[i].dest == pkt->src) {
-			routes[i].dest = pkt->src;
-			routes[i].nextHop = pkt->src;
-			routes[i].hops = 1;
-			routes[i].lastUpdated = millis();
-			break;
-    	}
-	}
+    // Always add direct 1-hop route to sender
+    updateRoute(pkt->src, pkt->src, 1);
+
+    // Parse and merge their advertised routes
+    HelloPayload advert;
+    memcpy(&advert, pkt->payload, sizeof(HelloPayload));
+
+    for (int i = 0; i < advert.routeCount; i++) {
+        uint8_t dest = advert.routes[i].dest;
+        uint8_t hops = advert.routes[i].hops + 1;
+
+        if (dest == NODE_ID) continue; // don't route to yourself
+
+        updateRoute(dest, pkt->src, hops);
+    }
 }
+
+void printRoutingTable() {
+    Serial.println("=== Routing Table ===");
+    for (int i = 0; i < MAX_ROUTES; i++) {
+        if (routes[i].dest != 0) {
+            Serial.print("dest=");
+            Serial.print(routes[i].dest);
+            Serial.print(" nextHop=");
+            Serial.print(routes[i].nextHop);
+            Serial.print(" hops=");
+            Serial.print(routes[i].hops);
+            Serial.print(" age=");
+            Serial.print((millis() - routes[i].lastUpdated) / 1000);
+            Serial.println("s");
+        }
+    }
+    Serial.println("=====================");
+}
+
 uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
 	    // Look in routing table first
     for (int i = 0; i < MAX_ROUTES; i++) {
@@ -217,7 +283,9 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
 
     // fallback: pick any neighbor (for simple test)
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
-        if (neighbors[i].nodeID != 0 && neighbors[i].nodeID != NODE_ID) {
+        if (neighbors[i].nodeID != 0 && 
+            neighbors[i].nodeID != NODE_ID && 
+            neighbors[i].nodeID != srcNode) {
             return neighbors[i].nodeID;
         }
     }
@@ -230,7 +298,7 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
 void handleTX() {
 	buttonState = digitalRead(BUTTON_PIN);
     if (buttonState != lastButtonState) {
-        if (buttonState == LOW && NODE_ID == 1) {
+        if (buttonState == LOW) {
             Serial.println("Button Pressed Once!");
             display.setCursor(0,40); 
             display.print("TX: Packet sent"); 
@@ -239,36 +307,32 @@ void handleTX() {
             static uint16_t seqCounter = 0;
 
             MeshPacket pkt = {};
-            pkt.src = NODE_ID;
-            pkt.lastHop = NODE_ID;
-            
-            uint8_t targetNode = 3;   // the ultimate destination for your test
-            pkt.dst = targetNode;      // MUST be set to the final destination
+            pkt.src = NODE_ID;       // Node 1
+            pkt.lastHop = NODE_ID;   // starts with self
+            pkt.dst = 3;             // final destination
             pkt.ttl = 5;
             pkt.seq = seqCounter++;
             pkt.type = PKT_GPS;
 
             buildPacket(counter, 1, pkt.payload);
-			counter++; 
-			Serial.print(counter); 
-			
+            counter++;
 
-            // pick a nextHop dynamically
-            uint8_t nextHop = selectNextHop(targetNode, pkt.src);
+            /*
+            // HARD CODE: send first hop to Node 2
+            pkt.nextHop = 2;
+            */
 
-			if (nextHop != 0) {
-				display.setCursor(0, 50);
-				display.print("FWD: ");
-				display.print(nextHop);
-				display.display();
-			} else {
-				Serial.println("No neighbor to forward to yet!");
-				return;  // don’t send
-			}
+           pkt.nextHop = selectNextHop(pkt.dst, NODE_ID);
+
+            if (pkt.nextHop == 0) {
+                Serial.println("No route yet, waiting for HELLO convergence...");
+                lastButtonState = buttonState;
+                return;
+            }
 
             display.setCursor(0, 50);
             display.print("FWD: ");
-            display.print(nextHop);
+            display.print(pkt.nextHop);
             display.display();
 
             delay(random(40, 200));
@@ -281,100 +345,124 @@ void handleTX() {
 }
 
 void handleRX() {
-	if (receivedFlag) {
-        receivedFlag = false;
+    if (!receivedFlag) return;
+    receivedFlag = false;
 
-        uint8_t inBuf[64];
-        int len = radio.getPacketLength();
-        int state = radio.readData(inBuf, len);
-        if (state != RADIOLIB_ERR_NONE) {
+    uint8_t inBuf[sizeof(MeshPacket)];
+    int len = radio.getPacketLength();
+    int state = radio.readData(inBuf, len);
+    if (state != RADIOLIB_ERR_NONE) {
+        radio.startReceive();
+        return;
+    }
+
+    MeshPacket *pkt = (MeshPacket*)inBuf;
+
+    // Ignore own packets
+    if (pkt->src == NODE_ID) {
+        radio.startReceive();
+        return;
+    }
+
+    // remove for outdoor testing
+    #if NODE_ID == 1
+        if (pkt->src == 3 || pkt->lastHop == 3) {
             radio.startReceive();
             return;
         }
-
-		float rssi = radio.getRSSI();
-		float snr  = radio.getSNR();
-
-		Serial.print("RSSI: ");
-		Serial.println(rssi);
-
-		Serial.print("SNR: ");
-		Serial.println(snr);
-
-        MeshPacket *pkt = (MeshPacket*)inBuf;
-        if (pkt->src == NODE_ID) {
+    #endif
+    #if NODE_ID == 3
+        if (pkt->src == 1 || pkt->lastHop == 1) {
             radio.startReceive();
             return;
         }
+    #endif
 
-        if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
-            Serial.println("Duplicate packet dropped");
-            radio.startReceive();
-            return;
-        }
 
-        if (pkt->type == PKT_HELLO) {
-            updateNeighbors(pkt);
-        }
+    //stop if the packet already been seen before
+    if (pkt->type != PKT_HELLO && seenBefore(pkt->src, pkt->seq)) {
+        radio.startReceive();
+        return;
+    }
 
-        if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
-            // Packet reached final destination
-            float rxLat, rxLng;
-            uint8_t rxNode;
-            parsePacket(pkt->payload, rxLat, rxLng, rxNode);
+    // HELLO packets update neighbors immediately
+    if (pkt->type == PKT_HELLO) {
+        updateNeighbors(pkt);
+    }
 
-            Serial.print("RX from node ");
-            Serial.println(pkt->src);
+    // DEBUG: show what this node received
+    if (pkt->type == PKT_GPS) {
+        Serial.print("RX from node ");
+        Serial.print(pkt->src);
+        Serial.print(" lastHop=");
+        Serial.println(pkt->lastHop);
+    }
 
-            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-            display.setCursor(0, 40);
-            display.print("RX ");
-            display.print(pkt->src);
-            display.print(": ");
-            display.print(rxLat, 4);
-            display.print(",");
-            display.print(rxLng, 4);
-			display.setCursor(50, 50);
-			display.print("Last Hop: ");
-			display.print(pkt->lastHop); 
+    // Packet reached final destination
+    if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
+        float rxLat, rxLng;
+        uint8_t rxNode;
+        parsePacket(pkt->payload, rxLat, rxLng, rxNode);
 
-			display.setCursor(80,0);
-			display.print("R:");
-			display.print(rssi,0);
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0, 40);
+        display.print("RX ");
+        display.print(pkt->src);
+        display.print(": ");
+        display.print(rxLat, 4);
+        display.print(",");
+        display.print(rxLng, 4);
 
-			display.setCursor(80,10); 
-			display.print(" S:");
-			display.print(snr,1);
-            display.display();
-        }
+        display.setCursor(50, 50);
+        display.print("Last Hop: ");
+        display.print(pkt->lastHop); 
+        display.display();
+    }
 
-        // Forward if not final destination
-        if (pkt->type == PKT_GPS && pkt->ttl > 0 && pkt->dst != NODE_ID) {
-            uint8_t nextHop = selectNextHop(pkt->dst, pkt->src);
+    // Forward if not final destination
+    if (pkt->type == PKT_GPS && pkt->dst != NODE_ID && pkt->ttl > 0) {
 
-            if (nextHop == MESH_BROADCAST) {
-                Serial.println("No route to destination!");
+        // Only forward if this node is the intended nextHop
+        if (pkt->nextHop == NODE_ID || pkt->nextHop == MESH_BROADCAST) {
+
+            /*
+            // HARDCODE FOR PROOF OF CONCEPT:
+            // Node 1 → 2 → 3
+            if (NODE_ID == 2) {
+                pkt->nextHop = 3;
+            }
+            */
+
+           pkt->nextHop = selectNextHop(pkt->dst, pkt->src);
+            if (pkt->nextHop == 0) {
                 radio.startReceive();
-                return;
+                return; // no route, drop it
             }
 
-            // display forwarding
+            // Update lastHop BEFORE forwarding
+            pkt->lastHop = NODE_ID;
+            pkt->ttl--;
+
+            Serial.print("Forwarding packet to node: ");
+            Serial.println(pkt->nextHop);
+
             display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
             display.setCursor(0, 50);
             display.print("FWD: ");
+            display.print(pkt->nextHop);
             display.display();
-            pkt->ttl--;
-            pkt->lastHop = NODE_ID;
 
             delay(random(40, 200));
-            radio.transmit((uint8_t*)pkt, len);
+            radio.transmit((uint8_t*)pkt, len);  // transmit ONCE
+            radio.startReceive();
         }
-
-        radio.startReceive();
     }
+
+    radio.startReceive();
 }
 
 void setup(){
+    Serial.begin(9600); 
 	delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT);
@@ -418,10 +506,9 @@ void setup(){
 	  while (true) { delay(10); }
 	}
 
-	int st = radio.begin();
 	Serial.print("radio.begin() -> ");
-	Serial.println(st);
-	if (st != RADIOLIB_ERR_NONE) {
+	Serial.println(state);
+	if (state != RADIOLIB_ERR_NONE) {
 	  Serial.println("radio.begin() failed. Check wiring, power, constructor ordering.");
 	  while (true) { delay(1000); }
 	}
@@ -475,9 +562,16 @@ void loop() {
 
     //bool locationUpdated = gps.location.isUpdated();
     bool dateUpdated = gps.date.isUpdated();
-	sendHello(); 
 
+	sendHello(); 
 	readGPS(); 
+
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 20000) {
+        lastPrint = millis();
+        printRoutingTable();
+    }
+
  
 
     if (dateUpdated) {
@@ -496,7 +590,8 @@ void loop() {
     }
 
 
-	
+
+	/*
 	Serial.println("Current neighbors:");
 	for(int i = 0; i < MAX_NEIGHBORS; i++){
 		if(neighbors[i].nodeID != 0){
@@ -507,6 +602,8 @@ void loop() {
 		}
 	}
 	Serial.println("---");
+    */
+
 	
 	
 	handleRX(); 
