@@ -9,7 +9,10 @@
       "Bash(dir:*)",
       "WebFetch(domain:registry.platformio.org)",
       "Bash(pio lib install:*)",
-      "Bash(platformio lib install:*)"
+      "Bash(platformio lib install:*)",
+      "Bash(openssl version:*)",
+      "Bash(openssl rand:*)"
     ]
-  }
+  },
+  "outputStyle": "Explanatory"
 }

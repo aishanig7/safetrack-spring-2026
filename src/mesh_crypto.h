@@ -13,6 +13,9 @@ extern "C" {
 #include "meshPacket.h"
 #include "crypto_config.h"
 
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x)  STRINGIFY_(x)
+
 // Global packet counter for nonce generation
 static uint64_t g_packetCounter = 0;
 static bool g_crypto_initialized = false;
@@ -176,8 +179,11 @@ bool decryptMeshPacket(const EncryptedMeshPacket* encrypted, MeshPacket* plain) 
 }
 
 /**
- * Measure crypto latency for performance testing
+ * Measure crypto latency over multiple iterations, reporting min/avg/max.
+ * The first iteration is discarded to avoid cold-start skew.
  */
+#define CRYPTO_BENCH_RUNS 100
+
 void measureCryptoLatency() {
   MeshPacket testPkt = {};
   testPkt.src = 1;
@@ -190,19 +196,43 @@ void measureCryptoLatency() {
   EncryptedMeshPacket encrypted;
   MeshPacket decrypted;
 
-  uint32_t start = micros();
-  encryptMeshPacket(&testPkt, &encrypted);
-  uint32_t encryptTime = micros() - start;
+  uint32_t encMin = UINT32_MAX, encMax = 0;
+  uint64_t encSum = 0;
+  uint32_t decMin = UINT32_MAX, decMax = 0;
+  uint64_t decSum = 0;
 
-  start = micros();
-  decryptMeshPacket(&encrypted, &decrypted);
-  uint32_t decryptTime = micros() - start;
+  // Iteration 0 is a warm-up; its results are discarded
+  for (int i = 0; i <= CRYPTO_BENCH_RUNS; i++) {
+    uint32_t start = micros();
+    encryptMeshPacket(&testPkt, &encrypted);
+    uint32_t encTime = micros() - start;
 
-  Serial.print("[CRYPTO] Encrypt latency: ");
-  Serial.print(encryptTime);
+    start = micros();
+    decryptMeshPacket(&encrypted, &decrypted);
+    uint32_t decTime = micros() - start;
+
+    if (i == 0) continue; // discard warm-up
+
+    encSum += encTime;
+    if (encTime < encMin) encMin = encTime;
+    if (encTime > encMax) encMax = encTime;
+
+    decSum += decTime;
+    if (decTime < decMin) decMin = decTime;
+    if (decTime > decMax) decMax = decTime;
+  }
+
+  uint32_t encAvg = (uint32_t)(encSum / CRYPTO_BENCH_RUNS);
+  uint32_t decAvg = (uint32_t)(decSum / CRYPTO_BENCH_RUNS);
+
+  Serial.println("[CRYPTO] Latency benchmark (" STRINGIFY(CRYPTO_BENCH_RUNS) " runs, warm-up discarded):");
+  Serial.print("  Encrypt  min="); Serial.print(encMin);
+  Serial.print(" avg=");           Serial.print(encAvg);
+  Serial.print(" max=");           Serial.print(encMax);
   Serial.println(" us");
-  Serial.print("[CRYPTO] Decrypt latency: ");
-  Serial.print(decryptTime);
+  Serial.print("  Decrypt  min="); Serial.print(decMin);
+  Serial.print(" avg=");           Serial.print(decAvg);
+  Serial.print(" max=");           Serial.print(decMax);
   Serial.println(" us");
 }
 

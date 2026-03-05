@@ -11,6 +11,7 @@
 #include "meshPacket.h"
 #include "node_identity.h"
 #include "mesh_crypto.h"
+#include "tests/encryption/crypto_file_tests.h"
 
 //Hardware and Pins
 #define LED (0 + 15)
@@ -438,6 +439,12 @@ void setup() {
   Serial.println("\n========================================");
   Serial.println("   CRYPTO TESTS COMPLETE - SUCCESS!");
   Serial.println("========================================");
+
+#ifdef CRYPTO_ADVANCED_TESTS
+  // Dump encrypted packet directly to Serial (no file I/O)
+  runCryptoFileTests();
+#endif
+
   Serial.println("Waiting 5 seconds before starting main loop...\n");
   delay(5000);  // 5 second pause to read crypto results
 
