@@ -64,6 +64,7 @@ struct SeenPacket {
 SeenPacket seenCache[DUP_CACHE_SIZE];
 uint8_t seenIndex = 0;
 
+// vars for ping protocol
 PongPacket pongList[MAX_PONGS];
 uint8_t pongCount = 0;
 bool collectingPongs = false;
@@ -71,6 +72,7 @@ unsigned long collectPongStartTime = 0;
 
 uint16_t seqCounter = 0;
 
+// packet to send gps coords
 MeshPacket currentPkt = {};
 
 // Declarations Functions
@@ -93,7 +95,6 @@ void readGPS() {
 
     double lng = gps.location.lng();
     double lat = gps.location.lat();
-    
 
     if (lat != lastLat || lng != lastLng) {
         lastLat = lat;
@@ -150,18 +151,18 @@ uint8_t nextNeighbor() {
     uint8_t nextNeighbor = 0;
 
     for(int i = 0; i < pongCount; i++) {
+		// to prevent packet from travelling back to a previous node
         bool visited = false;
-
         for(int j = 0; j < currentPkt.pathLen; j++) {
             if(currentPkt.path[j] == pongList[i].nodeID) {
                 visited = true;
                 break;
             }
         }
-
+		
         if(!visited && pongList[i].rssi > bestRSSI) {
-                bestRSSI = pongList[i].rssi;
-                nextNeighbor = pongList[i].nodeID;
+            bestRSSI = pongList[i].rssi;
+            nextNeighbor = pongList[i].nodeID;
         }
     }
     return nextNeighbor;
@@ -239,12 +240,11 @@ void handleRX() {
     }
 
     if(pkt->type == PKT_GPS) {
-
         if(seenBefore(pkt->src, pkt->seq)) {
             radio.startReceive();
             return;
         }
-
+		// once packet has reached final destination prints out to serial monitor
         if(pkt->dst == NODE_ID) {
             float rxLat, rxLng;
             uint8_t rxNode;
@@ -259,12 +259,13 @@ void handleRX() {
             display.print(",");
             display.print(rxLat, 4);
             radio.startReceive();
-            return;
-            
+            return; 
         }
 
         memcpy(&currentPkt, pkt, sizeof(MeshPacket));
 
+		// drops packet if ttl limit is exceeded (prevents clogging up network)
+		// might consider changing in future since if packet doesn't reach root it just drops it
         if(currentPkt.ttl > 0) {
             currentPkt.ttl--;
             sendPing();
@@ -282,7 +283,6 @@ void setup(){
 	pinMode(BUTTON_PIN, INPUT);
 	digitalWrite(LED, LOW);
 
-	
 	gpsSerial.begin(9600);
 	//SPI.begin(); // uses variant default SPI pins
 
@@ -359,8 +359,8 @@ void setup(){
 }
 
 void loop() {
-	//const size_t BUF_SZ = 256;
-
+	//const size_t BUF_SZ = 256; (i didn't see use of this var so commented it out)
+	
     // Read and decode GPS data
     while (gpsSerial.available() > 0) {
         gps.encode(gpsSerial.read());
@@ -390,7 +390,8 @@ void loop() {
 	
 	handleRX();
     handleTX();
-
+	
+	//checks for pongs for 3 seconds before stopping pong collection
     if(collectingPongs && millis() - collectPongStartTime > 3000){
         collectingPongs = false;
         uint8_t next = nextNeighbor();
