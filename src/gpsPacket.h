@@ -3,8 +3,8 @@
 
 struct GPSPacket {
     uint8_t node_id;
-    int32_t lat;
-    int32_t lon;
+    int32_t lat; // y axis
+    int32_t lon; // x axis
 };
 
 static uint8_t NODE_ID = 0x01; // Hardcoded
