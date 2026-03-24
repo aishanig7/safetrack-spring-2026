@@ -555,13 +555,16 @@ void setup(){
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+##ifdef _VARIANT_PROMICRO_V2_DIY_
+	// give powah
 	pinMode(PIN_GPS_EN, OUTPUT);
 	pinMode(PIN_DISPLAY_EN, OUTPUT);
-
-	digitalWrite(LED, LOW);
 	digitalWrite(PIN_GPS_EN, HIGH);
 	digitalWrite(PIN_DISPLAY_EN, HIGH);
 	delay(250);
+#endif // _VARIANT_PROMICRO_V2_DIY_
+
+	digitalWrite(LED, LOW);
 
 	Wire.begin();
 	SPI.begin();

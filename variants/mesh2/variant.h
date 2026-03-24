@@ -1,5 +1,5 @@
-#ifndef _VARIANT_PROMICRO_DIY_
-#define _VARIANT_PROMICRO_DIY_
+#ifndef _VARIANT_PROMICRO_V2_DIY_
+#define _VARIANT_PROMICRO_V2_DIY_
 
 /** Master clock frequency */
 #define VARIANT_MCK (64000000ul)
