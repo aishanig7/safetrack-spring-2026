@@ -19,9 +19,9 @@
 int32_t counter = 0; 
 
 // Node and Mesh
-#define NODE_ID 1
+//#define NODE_ID 1
 //#define NODE_ID 2
-//#define NODE_ID 3
+#define NODE_ID 3
 
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
@@ -300,7 +300,7 @@ void handleTX() {
     if (buttonState != lastButtonState) {
         if (buttonState == LOW) {
             Serial.println("Button Pressed Once!");
-            display.setCursor(0,40); 
+            display.setCursor(0,10); 
             display.print("TX: Packet sent"); 
             display.display(); 
 
@@ -329,7 +329,12 @@ void handleTX() {
                 lastButtonState = buttonState;
                 return;
             }
-
+            display.setCursor(0,20);
+            display.print("packet dest: ");
+            display.print(pkt.dst);
+            display.setCursor(0,30);
+            display.print("packet id: ");
+            display.print(pkt.seq); 
             display.setCursor(0, 50);
             display.print("FWD: ");
             display.print(pkt.nextHop);
@@ -351,6 +356,17 @@ void handleRX() {
     uint8_t inBuf[sizeof(MeshPacket)];
     int len = radio.getPacketLength();
     int state = radio.readData(inBuf, len);
+
+    float rssi = radio.getRSSI();
+    float snr = radio.getSNR();
+
+    Serial.print("PKT received type=");
+    Serial.print(((MeshPacket*)inBuf)->type);
+    Serial.print(" src=");
+    Serial.print(((MeshPacket*)inBuf)->src);
+    Serial.print(" dst=");
+    Serial.println(((MeshPacket*)inBuf)->dst);
+
     if (state != RADIOLIB_ERR_NONE) {
         radio.startReceive();
         return;
@@ -364,19 +380,23 @@ void handleRX() {
         return;
     }
 
+    
     // remove for outdoor testing
+    /*
     #if NODE_ID == 1
-        if (pkt->src == 3 || pkt->lastHop == 3) {
+        if (pkt->lastHop == 3) {
             radio.startReceive();
             return;
         }
     #endif
     #if NODE_ID == 3
-        if (pkt->src == 1 || pkt->lastHop == 1) {
+        if (pkt->lastHop == 1) {
             radio.startReceive();
             return;
         }
     #endif
+    */
+    
 
 
     //stop if the packet already been seen before
@@ -390,12 +410,52 @@ void handleRX() {
         updateNeighbors(pkt);
     }
 
+    if (pkt->type == PKT_ACK && pkt->dst == NODE_ID) {
+        ACKPayload ackPayload;
+        memcpy(&ackPayload, pkt->payload, sizeof(ACKPayload));
+
+        Serial.print("ACK received for seq=");
+        Serial.println(ackPayload.originalSeq);
+
+        display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0, 40);
+        display.print("ACK received!");
+        display.setCursor(0, 50);
+        display.print("seq=");
+        display.print(ackPayload.originalSeq);
+        display.display();
+
+        radio.startReceive();
+        return;
+    }
+
     // DEBUG: show what this node received
     if (pkt->type == PKT_GPS) {
         Serial.print("RX from node ");
         Serial.print(pkt->src);
         Serial.print(" lastHop=");
         Serial.println(pkt->lastHop);
+
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0,10); 
+        display.print("RSSI: ");
+        display.print((int)rssi);
+        display.print(" ");
+        display.print("SNR: "); 
+        display.print(snr, 1); 
+        display.setCursor(0,20);
+        display.print("dest: ");
+        display.print(pkt->dst);
+        display.print(" "); 
+        display.print("pkt id: ");
+        display.print(pkt->seq); 
+        display.setCursor(0,30);
+        display.print("next hop: "); 
+        display.print(pkt->nextHop); 
+        display.display(); 
+
+
     }
 
     // Packet reached final destination
@@ -417,10 +477,37 @@ void handleRX() {
         display.print("Last Hop: ");
         display.print(pkt->lastHop); 
         display.display();
+
+        // Build and send ACK
+        MeshPacket ack = {};
+        ack.src = NODE_ID;
+        ack.lastHop = NODE_ID;
+        ack.dst = pkt->src;
+        ack.ttl = 5;
+        ack.type = PKT_ACK;
+
+        static uint16_t ackSeq = 0;
+        ack.seq = ackSeq++;
+
+        ACKPayload ackPayload = {};
+        ackPayload.originalSrc = pkt->src;
+        ackPayload.originalSeq = pkt->seq;
+        memcpy(ack.payload, &ackPayload, sizeof(ACKPayload));
+
+        ack.nextHop = selectNextHop(ack.dst, NODE_ID);
+        if (ack.nextHop != 0) {
+            Serial.print("Sending ACK to node ");
+            Serial.println(ack.dst);
+            delay(random(20, 80));
+            radio.standby();
+            radio.transmit((uint8_t*)&ack, sizeof(MeshPacket));
+        }
+        radio.startReceive();
+        return;
     }
 
     // Forward if not final destination
-    if (pkt->type == PKT_GPS && pkt->dst != NODE_ID && pkt->ttl > 0) {
+    if ((pkt->type == PKT_GPS || pkt->type == PKT_ACK) && pkt->dst != NODE_ID && pkt->ttl > 0) {
 
         // Only forward if this node is the intended nextHop
         if (pkt->nextHop == NODE_ID || pkt->nextHop == MESH_BROADCAST) {
@@ -443,7 +530,9 @@ void handleRX() {
             pkt->lastHop = NODE_ID;
             pkt->ttl--;
 
-            Serial.print("Forwarding packet to node: ");
+            Serial.print("Forwarding ");
+            Serial.print(pkt->type == PKT_ACK ? "ACK" : "packet");
+            Serial.print(" to node: ");
             Serial.println(pkt->nextHop);
 
             display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
@@ -475,6 +564,10 @@ void setup(){
 
 	for(int i = 0; i < MAX_ROUTES; i++){
     	routes[i].dest = 0;
+        routes[i].nextHop = 0;
+        routes[i].hops = 0;
+        routes[i].lastUpdated = 0;
+
 	}
 	
 	gpsSerial.begin(9600);
@@ -540,13 +633,15 @@ void setup(){
 	display.display();
 	
     display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // White text on black background (for overwr)
+    /*
 	display.setCursor(0, 0);
 	display.print("Lat: NONE");
 	display.setCursor(0, 10);
 	display.print("Lng: NONE");
 	display.setCursor(0, 20);
 	display.print("Date: NONE");
-	display.setCursor(0, 30);
+    */
+	display.setCursor(0, 0);
 	display.print("Node ID: ");
 	display.print(NODE_ID); 
 	display.display();
@@ -564,7 +659,7 @@ void loop() {
     bool dateUpdated = gps.date.isUpdated();
 
 	sendHello(); 
-	readGPS(); 
+	//readGPS(); 
 
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 20000) {
@@ -573,7 +668,7 @@ void loop() {
     }
 
  
-
+    /*
     if (dateUpdated) {
         TinyGPSDate date = gps.date;
 
@@ -588,6 +683,7 @@ void loop() {
             display.display();
         }
     }
+    */
 
 
 
