@@ -11,7 +11,6 @@
 
 //Hardware and Pins
 #define LED (0 + 15)
-#define BUTTON_PIN (0+32)
 #define OLED_RESET -1
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
@@ -552,10 +551,20 @@ void handleRX() {
 
 void setup(){
     Serial.begin(9600); 
-	delay(1000); 
+	//delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
-	pinMode(BUTTON_PIN, INPUT);
+	pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+	pinMode(PIN_GPS_EN, OUTPUT);
+	pinMode(PIN_DISPLAY_EN, OUTPUT);
+
 	digitalWrite(LED, LOW);
+	digitalWrite(PIN_GPS_EN, HIGH);
+	digitalWrite(PIN_DISPLAY_EN, HIGH);
+	delay(250);
+
+	Wire.begin();
+	SPI.begin();
 
 	for(int i = 0; i < MAX_NEIGHBORS; i++){
         neighbors[i].nodeID = 0;
@@ -596,16 +605,10 @@ void setup(){
 	} else {
 	  Serial.print(F("failed, code "));
 	  Serial.println(state);
-	  while (true) { delay(10); }
+	  while (true) { delay(10); 
+	  Serial.println("radio errored");}
 	}
 
-	Serial.print("radio.begin() -> ");
-	Serial.println(state);
-	if (state != RADIOLIB_ERR_NONE) {
-	  Serial.println("radio.begin() failed. Check wiring, power, constructor ordering.");
-	  while (true) { delay(1000); }
-	}
-	
 	// set modem parameters
 	radio.setFrequency(FREQ_MHZ);
 	radio.setSpreadingFactor(SF);
