@@ -174,13 +174,11 @@ void sendHello() {
     }
 }
 void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops) {
-    // Update if route already exists and new one is better
     for (int i = 0; i < MAX_ROUTES; i++) {
         if (routes[i].dest == dest) {
             if (hops < routes[i].hops) {
                 routes[i].nextHop = nextHop;
                 routes[i].hops = hops;
-                routes[i].lastUpdated = millis();
                 Serial.print("Route updated: dest=");
                 Serial.print(dest);
                 Serial.print(" via=");
@@ -188,6 +186,7 @@ void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops) {
                 Serial.print(" hops=");
                 Serial.println(hops);
             }
+            routes[i].lastUpdated = millis();
             return;
         }
     }
@@ -210,7 +209,7 @@ void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops) {
 }
 
 void updateNeighbors(MeshPacket* pkt) {
-    // Update neighbor table (existing logic)
+    // Update neighbor table
     bool found = false;
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
         if (neighbors[i].nodeID == pkt->src) {
@@ -248,6 +247,21 @@ void updateNeighbors(MeshPacket* pkt) {
     }
 }
 
+void cleanStaleRoutes() {
+    const unsigned long ROUTE_EXPIRY = 60000;
+    for (int i = 0; i < MAX_ROUTES; i++) {
+        if (routes[i].dest != 0 && 
+            (millis() - routes[i].lastUpdated) > ROUTE_EXPIRY) {
+            Serial.print("Route expired: dest=");
+            Serial.println(routes[i].dest);
+            routes[i].dest = 0;
+            routes[i].nextHop = 0;
+            routes[i].hops = 0;
+            routes[i].lastUpdated = 0;
+        }
+    }
+}
+
 void printRoutingTable() {
     Serial.println("=== Routing Table ===");
     for (int i = 0; i < MAX_ROUTES; i++) {
@@ -267,21 +281,18 @@ void printRoutingTable() {
 }
 
 uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
-	    // Look in routing table first
+    const unsigned long ROUTE_EXPIRY = 45000;
+
     for (int i = 0; i < MAX_ROUTES; i++) {
-        if (routes[i].dest == finalDest && routes[i].nextHop != 0) {
+        if (routes[i].dest == finalDest && 
+            routes[i].nextHop != 0 &&
+            (millis() - routes[i].lastUpdated) < ROUTE_EXPIRY) {
             return routes[i].nextHop;
         }
     }
-	/*
-	for (int i = 0; i < MAX_NEIGHBORS; i++) {
-		if (neighbors[i].nodeID == 2) {
-			return 2;
-		}
-	}
-	*/
 
-    // fallback: pick any neighbor (for simple test)
+    // fallback: pick any neighbor
+    /*
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
         if (neighbors[i].nodeID != 0 && 
             neighbors[i].nodeID != NODE_ID && 
@@ -289,9 +300,9 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
             return neighbors[i].nodeID;
         }
     }
+    */
 
-    // fallback
-    return 0;  // 0 = invalid nextHop, don’t broadcast
+    return 0;
 }
 
 
@@ -307,9 +318,9 @@ void handleTX() {
             static uint16_t seqCounter = 0;
 
             MeshPacket pkt = {};
-            pkt.src = NODE_ID;       // Node 1
-            pkt.lastHop = NODE_ID;   // starts with self
-            pkt.dst = 3;             // final destination
+            pkt.src = NODE_ID;
+            pkt.lastHop = NODE_ID;
+            pkt.dst = 3;            
             pkt.ttl = 5;
             pkt.seq = seqCounter++;
             pkt.type = PKT_GPS;
@@ -351,10 +362,15 @@ void handleRX() {
     uint8_t inBuf[sizeof(MeshPacket)];
     int len = radio.getPacketLength();
     int state = radio.readData(inBuf, len);
+
+    float rssi = radio.getRSSI();
+    float snr = radio.getSNR();
+
     if (state != RADIOLIB_ERR_NONE) {
         radio.startReceive();
         return;
     }
+
 
     MeshPacket *pkt = (MeshPacket*)inBuf;
 
@@ -364,19 +380,21 @@ void handleRX() {
         return;
     }
 
+    /*
     // remove for outdoor testing
     #if NODE_ID == 1
-        if (pkt->src == 3 || pkt->lastHop == 3) {
+        if (pkt->lastHop == 3) {
             radio.startReceive();
             return;
         }
     #endif
     #if NODE_ID == 3
-        if (pkt->src == 1 || pkt->lastHop == 1) {
+        if (pkt->lastHop == 1) {
             radio.startReceive();
             return;
         }
     #endif
+    */
 
 
     //stop if the packet already been seen before
@@ -388,6 +406,8 @@ void handleRX() {
     // HELLO packets update neighbors immediately
     if (pkt->type == PKT_HELLO) {
         updateNeighbors(pkt);
+        radio.startReceive(); // ADD
+        return;
     }
 
     // DEBUG: show what this node received
@@ -396,6 +416,24 @@ void handleRX() {
         Serial.print(pkt->src);
         Serial.print(" lastHop=");
         Serial.println(pkt->lastHop);
+
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0,10); 
+        display.print("RSSI: ");
+        display.print((int)rssi);
+        display.print(" ");
+        display.print("SNR: "); 
+        display.print(snr, 1); 
+        display.setCursor(0,20);
+        display.print("dest: ");
+        display.print(pkt->dst);
+        display.print(" "); 
+        display.print("pkt id: ");
+        display.print(pkt->seq); 
+        display.setCursor(0,30);
+        display.print("next hop: "); 
+        display.print(pkt->nextHop); 
+        display.display(); 
     }
 
     // Packet reached final destination
@@ -417,6 +455,9 @@ void handleRX() {
         display.print("Last Hop: ");
         display.print(pkt->lastHop); 
         display.display();
+
+        radio.startReceive();
+        return;
     }
 
     // Forward if not final destination
@@ -462,7 +503,7 @@ void handleRX() {
 }
 
 void setup(){
-    Serial.begin(9600); 
+    Serial.begin(115200); 
 	delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT);
@@ -475,6 +516,9 @@ void setup(){
 
 	for(int i = 0; i < MAX_ROUTES; i++){
     	routes[i].dest = 0;
+        routes[i].nextHop = 0;  // ADD
+        routes[i].hops = 0;     // ADD
+        routes[i].lastUpdated = 0; // ADD
 	}
 	
 	gpsSerial.begin(9600);
@@ -539,6 +583,7 @@ void setup(){
 	display.clearDisplay();
 	display.display();
 	
+    /*
     display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // White text on black background (for overwr)
 	display.setCursor(0, 0);
 	display.print("Lat: NONE");
@@ -550,6 +595,14 @@ void setup(){
 	display.print("Node ID: ");
 	display.print(NODE_ID); 
 	display.display();
+    */
+
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+    display.setCursor(0, 0);
+    display.print("Node ID: ");
+	display.print(NODE_ID);
+    display.display(); 
+
 }
 
 void loop() {
@@ -564,7 +617,7 @@ void loop() {
     bool dateUpdated = gps.date.isUpdated();
 
 	sendHello(); 
-	readGPS(); 
+	//readGPS(); 
 
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 20000) {
@@ -572,6 +625,11 @@ void loop() {
         printRoutingTable();
     }
 
+    static unsigned long lastCleanup = 0;
+    if (millis() - lastCleanup > 15000) {
+        lastCleanup = millis();
+        cleanStaleRoutes();
+    }
  
 
     if (dateUpdated) {
