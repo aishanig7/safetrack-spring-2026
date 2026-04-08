@@ -189,15 +189,16 @@ void updateBatteryDisplay() {
     
     display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
-    display.setCursor(100, 0);
+    display.setCursor(95, 0);
     display.print((int)batteryPercent);
     display.print("%");
     
     display.display();
     
     // Terminal
+	Serial.print("Battery: ");
     Serial.print(battery.getVoltage());
-    Serial.print("Battery: ");
+    Serial.print("Voltage: ");
     Serial.print(batteryPercent, 1);
     Serial.println("%");
 }
