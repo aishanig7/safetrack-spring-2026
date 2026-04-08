@@ -4,6 +4,16 @@
 .vscode/launch.json
 .vscode/ipch
 
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Build artifacts
+compile_commands.json
+
+# Log files
+*.log
+
 # Local docs
 QUICK_REFERENCE.md
 TESTING_GUIDE.md

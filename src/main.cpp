@@ -11,7 +11,7 @@
 #include "meshPacket.h"
 #include "node_identity.h"
 #include "mesh_crypto.h"
-#include "tests/encryption/crypto_file_tests.h"
+#include "tests/crypto_tests.h"
 
 //Hardware and Pins
 #define LED (0 + 15)
