@@ -18,9 +18,9 @@
 
 int32_t counter = 0; 
 // Node and Mesh
-#define NODE_ID 1
+//#define NODE_ID 1
 //#define NODE_ID 2
-//#define NODE_ID 3
+#define NODE_ID 3
 
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
@@ -54,6 +54,13 @@ unsigned long lastRXActivity = 0;
 volatile uint16_t pendingAckSeq = 0;
 volatile bool ackReceivedFlag = false;
 unsigned long ackWaitStart = 0;
+bool pendingACK = false;
+MeshPacket pendingPkt;
+uint16_t pendingSeq = 0;
+unsigned long pendingSentAt = 0;
+uint8_t pendingRetries = 0;
+#define MAX_RETRIES 3
+#define ACK_TIMEOUT 5000
 
 //Objects
 Adafruit_SSD1306 display(128, 64, &Wire, OLED_RESET);
@@ -387,7 +394,6 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
     uint8_t bestNext = 0;
     int16_t bestRSSI = -999;
     uint8_t bestHops = 255;
-    bool neighborFound = false;
 
     for (int i = 0; i < MAX_ROUTES; i++) {
 
@@ -395,6 +401,8 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
 
         uint8_t nextHop = routes[i].nextHop;
         if (nextHop == srcNode) continue;
+
+        bool neighborFound = false;
 
         // find neighbor RSSI
         int16_t linkRSSI = -200;
@@ -508,6 +516,12 @@ void handleTX() {
             delay(10);
             radio.setPacketReceivedAction(setFlag);
             radio.startReceive();
+
+            pendingACK = true;
+            pendingPkt = pkt;
+            pendingSeq = pkt.seq;
+            pendingSentAt = millis();
+            pendingRetries = 0;
         }
         lastButtonState = buttonState;
     }
@@ -515,6 +529,7 @@ void handleTX() {
 
 void handleRX() {
     if (!receivedFlag) return;
+    Serial.println("handleRX triggered");
     receivedFlag = false;
     lastRXActivity = millis();
 
@@ -527,10 +542,16 @@ void handleRX() {
     }
 
     int state = radio.readData(inBuf, len);
-
-
     float rssi = radio.getRSSI();
     float snr = radio.getSNR();
+
+    MeshPacket *rawPkt = (MeshPacket*)inBuf;
+    Serial.print("RAW RX: type=");
+    Serial.print(rawPkt->type);
+    Serial.print(" src=");
+    Serial.print(rawPkt->src);
+    Serial.print(" dst=");
+    Serial.println(rawPkt->dst);
 
     if (state != RADIOLIB_ERR_NONE) {
         radio.startReceive();
@@ -584,6 +605,12 @@ void handleRX() {
         memcpy(&ackPayload, pkt->payload, sizeof(ACKPayload));
         Serial.print("ACK received for seq=");
         Serial.println(ackPayload.originalSeq);
+
+        if (pendingACK && ackPayload.originalSeq == pendingSeq) {
+            pendingACK = false;
+            Serial.println("Pending ACK cleared");
+        }
+
         display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
         display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
         display.setCursor(0, 40);
@@ -657,13 +684,25 @@ void handleRX() {
         memcpy(ack.payload, &ackPayload, sizeof(ACKPayload));
 
         ack.nextHop = selectNextHop(ack.dst, NODE_ID);
+        Serial.print("ACK nextHop resolved: ");
+        Serial.println(ack.nextHop); 
+
+        if (ack.nextHop == 0) {
+            Serial.println("No route for ACK, using lastHop fallback");
+            ack.nextHop = pkt->lastHop;
+        }
+
         if (ack.nextHop != 0) {
             Serial.print("Sending ACK to node ");
-            Serial.println(ack.dst);
+            Serial.print(ack.dst);
+            Serial.print(" via nextHop=");
+            Serial.println(ack.nextHop);
             delay(random(20, 80));
             radio.standby();
 
             bool success = reliableTransmit(ack, 3);
+            Serial.print("ACK transmit success: ");
+            Serial.println(success ? "YES" : "NO");
 
             if (!success) {
                 Serial.println("ACK failed after retries");
@@ -757,6 +796,7 @@ void setup(){
         routes[i].nextHop = 0;
         routes[i].hops = 0;    
         routes[i].lastUpdated = 0; 
+        routes[i].linkRSSI = -128;
 	}
 	
 	gpsSerial.begin(9600);
@@ -859,6 +899,54 @@ void loop() {
         radio.setPacketReceivedAction(setFlag); 
         radio.startReceive();
         lastRXActivity = millis();
+    }
+
+    if (pendingACK && millis() - pendingSentAt > ACK_TIMEOUT) {
+        if (pendingRetries < MAX_RETRIES) {
+            pendingRetries++;
+            Serial.print("ACK timeout - retry ");
+            Serial.print(pendingRetries);
+            Serial.print("/");
+            Serial.println(MAX_RETRIES);
+
+            // Refresh nextHop in case routing changed
+            pendingPkt.nextHop = selectNextHop(pendingPkt.dst, NODE_ID);
+            pendingPkt.lastHop = NODE_ID;
+
+            if (pendingPkt.nextHop == 0) {
+                Serial.println("No route for retry, aborting");
+                pendingACK = false;
+                display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
+                display.setCursor(0, 40);
+                display.print("SEND FAILED");
+                display.display();
+            } else {
+                display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
+                display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+                display.setCursor(0, 40);
+                display.print("Retry ");
+                display.print(pendingRetries);
+                display.print("/");
+                display.print(MAX_RETRIES);
+                display.display();
+
+                if (channelBusy()) delay(getBackoff(PRI_GPS));
+                radio.transmit((uint8_t*)&pendingPkt, sizeof(MeshPacket));
+                lastRXActivity = millis();
+                delay(10);
+                radio.setPacketReceivedAction(setFlag);
+                radio.startReceive();
+                pendingSentAt = millis();
+            }
+        } else {
+            Serial.println("Max retries reached - SEND FAILED");
+            pendingACK = false;
+            display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
+            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+            display.setCursor(0, 40);
+            display.print("SEND FAILED");
+            display.display();
+        }
     }
 
     //bool locationUpdated = gps.location.isUpdated();
