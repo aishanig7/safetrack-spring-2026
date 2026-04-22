@@ -170,6 +170,22 @@ bool seenBefore(uint8_t src, uint16_t seq) {
   return false;
 }
 
+bool hasSeen(uint8_t src, uint16_t seq) {
+    for (int i = 0; i < DUP_CACHE_SIZE; i++) {
+        if (seenCache[i].src == src && 
+            seenCache[i].seq == seq) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void markSeen(uint8_t src, uint16_t seq) {
+    seenCache[seenIndex].src = src;
+    seenCache[seenIndex].seq = seq;
+    seenIndex = (seenIndex + 1) % DUP_CACHE_SIZE;
+}
+
 void sendHello() {
     //const unsigned long HELLO_INTERVAL = 15000;
     static unsigned long lastHello = 0;
@@ -244,7 +260,6 @@ void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops, int16_t rssi) {
             if (betterHopCount || (samePath && betterRSSI)) {
                 routes[i].nextHop = nextHop;
                 routes[i].hops = hops;
-                routes[i].lastUpdated = millis();
                 routes[i].linkRSSI = rssi;
 
                 Serial.print(millis() / 1000);
@@ -254,6 +269,10 @@ void updateRoute(uint8_t dest, uint8_t nextHop, uint8_t hops, int16_t rssi) {
                 Serial.print(nextHop);
                 Serial.print(" hops=");
                 Serial.println(hops);
+            }
+
+            if (samePath || betterHopCount) {
+                routes[i].lastUpdated = millis(); // refresh if route confirmed
             }
             return;
         }
@@ -338,7 +357,7 @@ void updateNeighbors(MeshPacket* pkt, int16_t rssi) {
 }
 
 void cleanStaleNeighbors() {
-    const unsigned long NEIGHBOR_TIMEOUT = 30000;
+    const unsigned long NEIGHBOR_TIMEOUT = 45000;
 
     for (int i = 0; i < MAX_NEIGHBORS; i++) {
         if (neighbors[i].nodeID != 0 &&
@@ -366,6 +385,7 @@ void cleanStaleRoutes() {
             routes[i].nextHop = 0;
             routes[i].hops = 0;
             routes[i].lastUpdated = 0;
+            routes[i].linkRSSI = -128; 
         }
     }
 }
@@ -396,24 +416,21 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
     uint8_t bestHops = 255;
 
     for (int i = 0; i < MAX_ROUTES; i++) {
-
         if (routes[i].dest != finalDest) continue;
 
         uint8_t nextHop = routes[i].nextHop;
         if (nextHop == srcNode) continue;
 
         bool neighborFound = false;
+        int16_t linkRSSI = routes[i].linkRSSI;
 
-        // find neighbor RSSI
-        int16_t linkRSSI = -200;
         for (int j = 0; j < MAX_NEIGHBORS; j++) {
             if (neighbors[j].nodeID == nextHop) {
-
                 if (millis() - neighbors[j].lastSeen > 30000) {
-                    linkRSSI = -200;
+                    Serial.println("Neighbor stale, using stored linkRSSI");
+                    neighborFound = true;
                     break;
                 }
-
                 linkRSSI = neighbors[j].rssi;
                 neighborFound = true;
                 break;
@@ -427,8 +444,7 @@ uint8_t selectNextHop(uint8_t finalDest, uint8_t srcNode) {
             bestRSSI = linkRSSI;
             bestHops = routes[i].hops;
             bestNext = nextHop;
-        }
-        else if (abs(linkRSSI - bestRSSI) <= 2 && routes[i].hops < bestHops) {
+        } else if (abs(linkRSSI - bestRSSI) <= 2 && routes[i].hops < bestHops) {
             bestHops = routes[i].hops;
             bestNext = nextHop;
         }
@@ -447,6 +463,8 @@ bool reliableTransmit(MeshPacket &pkt, uint8_t maxRetries) {
         int state = radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
 
         if (state == RADIOLIB_ERR_NONE) {
+            delay(10);
+            radio.setPacketReceivedAction(setFlag);
             return true; // success
         }
 
@@ -463,6 +481,13 @@ void handleTX() {
 	buttonState = digitalRead(BUTTON_PIN);
     if (buttonState != lastButtonState) {
         if (buttonState == LOW) {
+
+            if (pendingACK) {
+                Serial.println("Waiting for ACK, ignoring button press");
+                lastButtonState = buttonState;
+                return;
+            }
+
             Serial.println("Button Pressed Once!");
             display.setCursor(0,40); 
             display.print("TX: Packet sent"); 
@@ -585,11 +610,42 @@ void handleRX() {
 
 
     //stop if the packet already been seen before
+    /*
     bool isDuplicate = seenBefore(pkt->src, pkt->seq);
 
     if (pkt->type != PKT_HELLO && isDuplicate) {
         radio.startReceive();
         return;
+    }
+    */
+
+
+    /*
+    if (pkt->type != PKT_HELLO && hasSeen(pkt->src, pkt->seq)) {
+        Serial.print("Dropped duplicate src=");
+        Serial.print(pkt->src);
+        Serial.print(" seq=");
+        Serial.println(pkt->seq);
+        radio.startReceive();
+        return;
+    }
+    */
+
+    bool isDuplicate = hasSeen(pkt->src, pkt->seq);
+
+    if (pkt->type != PKT_HELLO && isDuplicate) {
+
+        if (pkt->dst == NODE_ID) {
+            Serial.println("Duplicate received at destination → re-sending ACK");
+
+        } else {
+            Serial.print("Dropped duplicate src=");
+            Serial.print(pkt->src);
+            Serial.print(" seq=");
+            Serial.println(pkt->seq);
+            radio.startReceive();
+            return;
+        }
     }
 
     // HELLO packets update neighbors immediately
@@ -711,7 +767,7 @@ void handleRX() {
             lastRXActivity = millis();
             radio.setPacketReceivedAction(setFlag);
         }
-
+        markSeen(pkt->src, pkt->seq);
         radio.startReceive();
         return;
     }
@@ -768,6 +824,7 @@ void handleRX() {
 
             //default send 
             radio.transmit((uint8_t*)pkt, len);
+            markSeen(pkt->src, pkt->seq); 
             lastRXActivity = millis();
             delay(10);
             radio.setPacketReceivedAction(setFlag);
@@ -909,17 +966,13 @@ void loop() {
             Serial.print("/");
             Serial.println(MAX_RETRIES);
 
-            // Refresh nextHop in case routing changed
             pendingPkt.nextHop = selectNextHop(pendingPkt.dst, NODE_ID);
             pendingPkt.lastHop = NODE_ID;
 
             if (pendingPkt.nextHop == 0) {
-                Serial.println("No route for retry, aborting");
-                pendingACK = false;
-                display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
-                display.setCursor(0, 40);
-                display.print("SEND FAILED");
-                display.display();
+                Serial.println("No route yet, will retry again");
+                pendingSentAt = millis();
+                pendingRetries--;
             } else {
                 display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
                 display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
@@ -931,6 +984,7 @@ void loop() {
                 display.display();
 
                 if (channelBusy()) delay(getBackoff(PRI_GPS));
+                radio.standby();
                 radio.transmit((uint8_t*)&pendingPkt, sizeof(MeshPacket));
                 lastRXActivity = millis();
                 delay(10);
