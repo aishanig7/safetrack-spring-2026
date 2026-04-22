@@ -8,6 +8,7 @@
 #include <cstdio>
 #include "gpsPacket.h"
 #include "meshPacket.h"
+#include "node_identity.h"
 
 //Hardware and Pins
 #define LED (0 + 15)
@@ -16,11 +17,8 @@
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
 
-int32_t counter = 0; 
+int32_t counter = 0;
 // Node and Mesh
-//#define NODE_ID 1
-//#define NODE_ID 2
-#define NODE_ID 3
 
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
@@ -207,13 +205,13 @@ void sendHello() {
         Serial.println("s: Sending HELLO");
 
         lastHello = millis();
-        nextHelloIn = HELLO_BASE + random(0, HELLO_JITTER) + NODE_ID * 37;
+        nextHelloIn = HELLO_BASE + random(0, HELLO_JITTER) + NodeIdentity::getNodeId() * 37;
 
         static uint16_t seqCounter = 0;
 
         MeshPacket pkt = {};
-        pkt.src = NODE_ID;
-        pkt.lastHop = NODE_ID;
+        pkt.src = NodeIdentity::getNodeId();
+        pkt.lastHop = NodeIdentity::getNodeId();
         pkt.dst = MESH_BROADCAST;
         pkt.ttl = 1;
         pkt.seq = seqCounter++;
@@ -350,7 +348,7 @@ void updateNeighbors(MeshPacket* pkt, int16_t rssi) {
         uint8_t dest = advert.routes[i].dest;
         uint8_t hops = advert.routes[i].hops + 1;
 
-        if (dest == NODE_ID) continue; // don't route to yourself
+        if (dest == NodeIdentity::getNodeId()) continue; // don't route to yourself
 
         updateRoute(dest, pkt->src, hops, (int16_t)rssi);
     }
@@ -496,9 +494,9 @@ void handleTX() {
             static uint16_t seqCounter = 0;
 
             MeshPacket pkt = {};
-            pkt.src = NODE_ID;
-            pkt.lastHop = NODE_ID;
-            pkt.dst = 3;            
+            pkt.src = NodeIdentity::getNodeId();
+            pkt.lastHop = NodeIdentity::getNodeId();
+            pkt.dst = 3;
             pkt.ttl = 5;
             pkt.seq = seqCounter++;
 
@@ -516,7 +514,7 @@ void handleTX() {
             pkt.nextHop = 2;
             */
 
-           pkt.nextHop = selectNextHop(pkt.dst, NODE_ID);
+           pkt.nextHop = selectNextHop(pkt.dst, NodeIdentity::getNodeId());
 
             if (pkt.nextHop == 0) {
                 Serial.println("No route yet, waiting for HELLO convergence...");
@@ -587,7 +585,7 @@ void handleRX() {
     MeshPacket *pkt = (MeshPacket*)inBuf;
 
     // Ignore own packets
-    if (pkt->src == NODE_ID) {
+    if (pkt->src == NodeIdentity::getNodeId()) {
         radio.startReceive();
         return;
     }
@@ -635,7 +633,7 @@ void handleRX() {
 
     if (pkt->type != PKT_HELLO && isDuplicate) {
 
-        if (pkt->dst == NODE_ID) {
+        if (pkt->dst == NodeIdentity::getNodeId()) {
             Serial.println("Duplicate received at destination → re-sending ACK");
 
         } else {
@@ -656,7 +654,7 @@ void handleRX() {
         return;
     }
 
-    if (pkt->type == PKT_ACK && pkt->dst == NODE_ID) {
+    if (pkt->type == PKT_ACK && pkt->dst == NodeIdentity::getNodeId()) {
         ACKPayload ackPayload;
         memcpy(&ackPayload, pkt->payload, sizeof(ACKPayload));
         Serial.print("ACK received for seq=");
@@ -705,7 +703,7 @@ void handleRX() {
     }
 
     // Packet reached final destination
-    if (pkt->type == PKT_GPS && pkt->dst == NODE_ID) {
+    if (pkt->type == PKT_GPS && pkt->dst == NodeIdentity::getNodeId()) {
         float rxLat, rxLng;
         uint8_t rxNode;
         parsePacket(pkt->payload, rxLat, rxLng, rxNode);
@@ -725,8 +723,8 @@ void handleRX() {
         display.display();
 
         MeshPacket ack = {};
-        ack.src = NODE_ID;
-        ack.lastHop = NODE_ID;
+        ack.src = NodeIdentity::getNodeId();
+        ack.lastHop = NodeIdentity::getNodeId();
         ack.dst = pkt->src;
         ack.ttl = 5;
         ack.type = PKT_ACK;
@@ -739,7 +737,7 @@ void handleRX() {
         ackPayload.originalSeq = pkt->seq;
         memcpy(ack.payload, &ackPayload, sizeof(ACKPayload));
 
-        ack.nextHop = selectNextHop(ack.dst, NODE_ID);
+        ack.nextHop = selectNextHop(ack.dst, NodeIdentity::getNodeId());
         Serial.print("ACK nextHop resolved: ");
         Serial.println(ack.nextHop); 
 
@@ -773,12 +771,12 @@ void handleRX() {
     }
 
     // Forward if not final destination
-    if ((pkt->type == PKT_GPS || pkt->type == PKT_ACK) && pkt->dst != NODE_ID && pkt->ttl > 0) {
+    if ((pkt->type == PKT_GPS || pkt->type == PKT_ACK) && pkt->dst != NodeIdentity::getNodeId() && pkt->ttl > 0) {
 
         // Only forward if this node is the intended nextHop
-        if (pkt->nextHop == NODE_ID || pkt->nextHop == MESH_BROADCAST) {
+        if (pkt->nextHop == NodeIdentity::getNodeId() || pkt->nextHop == MESH_BROADCAST) {
 
-            if (pkt->lastHop == NODE_ID) return;
+            if (pkt->lastHop == NodeIdentity::getNodeId()) return;
 
             /*
             // HARDCODE FOR PROOF OF CONCEPT:
@@ -795,7 +793,7 @@ void handleRX() {
             }
 
             // Update lastHop BEFORE forwarding
-            pkt->lastHop = NODE_ID;
+            pkt->lastHop = NodeIdentity::getNodeId();
             pkt->ttl--;
 
             Serial.print("Forwarding ");
@@ -836,8 +834,16 @@ void handleRX() {
 }
 
 void setup(){
-    Serial.begin(115200); 
-	delay(1000); 
+    Serial.begin(115200);
+    NodeIdentity::initNodeIdentity();
+    const uint8_t* mac = NodeIdentity::getNodeMac();
+    Serial.printf(
+      "[Node] name=%s id=0x%02X role=%s mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
+      NodeIdentity::getNodeName(), NodeIdentity::getNodeId(),
+      NodeIdentity::isHeadNode() ? "HEAD" : "FIELD",
+      mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]
+    );
+	delay(1000);
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
 	digitalWrite(LED, LOW);
@@ -934,9 +940,11 @@ void setup(){
 
     display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
     display.setCursor(0, 0);
-    display.print("Node ID: ");
-	display.print(NODE_ID);
-    display.display(); 
+    display.print(NodeIdentity::getNodeName());
+    if (NodeIdentity::isHeadNode()) {
+        display.print(" HEAD-NODE");
+    }
+    display.display();
 
     delay(random(1000, 4000));
 
@@ -966,8 +974,8 @@ void loop() {
             Serial.print("/");
             Serial.println(MAX_RETRIES);
 
-            pendingPkt.nextHop = selectNextHop(pendingPkt.dst, NODE_ID);
-            pendingPkt.lastHop = NODE_ID;
+            pendingPkt.nextHop = selectNextHop(pendingPkt.dst, NodeIdentity::getNodeId());
+            pendingPkt.lastHop = NodeIdentity::getNodeId();
 
             if (pendingPkt.nextHop == 0) {
                 Serial.println("No route yet, will retry again");
