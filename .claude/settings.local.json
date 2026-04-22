@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//c/c/Users/asyed/myy stufff/asu/spring 26'/FSE104 - EPICS/firmware/SafeTrack-Spring-2026/**)",
-      "Read(//c/c/Users/asyed/myy stufff/asu/spring 26'/FSE104 - EPICS/firmware/SafeTrack-Spring-2026/logs/**)"
-    ]
-  }
-}
