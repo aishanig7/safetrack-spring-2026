@@ -99,10 +99,19 @@ Neighbor neighbors[MAX_NEIGHBORS];
 SeenPacket seenCache[DUP_CACHE_SIZE];
 uint8_t seenIndex = 0;
 
+// Display state machine
+enum DisplayState { DS_HOME, DS_SOS_FLASH, DS_SOS_SENT, DS_FORWARDING, DS_CONFIRMED, DS_SOS_RECEIVED, DS_SEND_FAILED };
+DisplayState dispState = DS_HOME;
+unsigned long flashFrameAt = 0;
+int flashFrame = 0;
+bool flashNoRoute = false;
+unsigned long sendFailedAt = 0;
+
 // Declarations Functions
 void setFlag(void);
 void setup();
 void loop();
+void updateDisplay();
 String bytesToAscii(const uint8_t *, size_t);
 
 
@@ -567,60 +576,34 @@ void handleTX() {
 
            pkt.nextHop = selectNextHop(pkt.dst, NODE_ID);
 
-            // Flash SOS immediately on button press
-            for (int i = 0; i < 5; i++) {
-                u8g2.clearBuffer();
-                drawTopHalf();
-                drawSOS();
-                u8g2.sendBuffer();
-                delay(500);
-                u8g2.clearBuffer();
-                drawTopHalf();
-                u8g2.sendBuffer();
-                delay(500);
-            }
-
             if (pkt.nextHop == 0) {
                 Serial.println("No route yet, waiting for HELLO convergence...");
-                u8g2.clearBuffer();
-                drawTopHalf();
-                u8g2.setFont(u8g2_font_logisoso16_tr);
-                const char* sf = "SEND FAILED";
-                u8g2.drawStr((128 - u8g2.getStrWidth(sf)) / 2, 52, sf);
-                u8g2.sendBuffer();
-                delay(5000);
-                u8g2.clearBuffer();
-                drawTopHalf();
-                drawTXHome();
-                u8g2.sendBuffer();
-                lastButtonState = buttonState;
-                return;
+                flashNoRoute = true;
+            } else {
+                flashNoRoute = false;
+                delay(random(40, 200));
+                radio.standby();
+                if (channelBusy()) {
+                    Serial.println("GPS delayed due to busy channel");
+                    delay(getBackoff(PRI_GPS));
+                }
+                radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+                lastRXActivity = millis();
+                delay(10);
+                radio.setPacketReceivedAction(setFlag);
+                radio.startReceive();
+
+                pendingACK = true;
+                pendingPkt = pkt;
+                pendingSeq = pkt.seq;
+                pendingSentAt = millis();
+                pendingRetries = 0;
             }
 
-            delay(random(40, 200));
-            radio.standby();
-
-            if (channelBusy()) {
-                Serial.println("GPS delayed due to busy channel");
-                delay(getBackoff(PRI_GPS));
-            }
-            radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-            lastRXActivity = millis();
-            delay(10);
-            radio.setPacketReceivedAction(setFlag);
-            radio.startReceive();
-
-            pendingACK = true;
-            pendingPkt = pkt;
-            pendingSeq = pkt.seq;
-            pendingSentAt = millis();
-            pendingRetries = 0;
-
-            // Stay on SOS SENT
-            u8g2.clearBuffer();
-            drawTopHalf();
-            drawSOS();
-            u8g2.sendBuffer();
+            // Start non-blocking flash — loop() drives it via updateDisplay()
+            dispState = DS_SOS_FLASH;
+            flashFrame = 0;
+            flashFrameAt = millis();
         }
         lastButtonState = buttonState;
     }
@@ -745,6 +728,7 @@ void handleRX() {
         drawTopHalf();
         drawConfirmed();
         u8g2.sendBuffer();
+        dispState = DS_CONFIRMED;
         radio.startReceive();
         return;
     }
@@ -773,6 +757,7 @@ void handleRX() {
         const char* sosRx = "SOS RECEIVED";
         u8g2.drawStr((128 - u8g2.getStrWidth(sosRx)) / 2, 52, sosRx);
         u8g2.sendBuffer();
+        dispState = DS_SOS_RECEIVED;
 
         MeshPacket ack = {};
         ack.src = NODE_ID;
@@ -990,6 +975,51 @@ void setup(){
 
 }
 
+void updateDisplay() {
+    unsigned long now = millis();
+
+    if (dispState == DS_SOS_FLASH) {
+        if (now - flashFrameAt >= 500) {
+            flashFrameAt = now;
+            flashFrame++;
+            bool showOn = (flashFrame % 2 == 1);
+            u8g2.clearBuffer();
+            drawTopHalf();
+            if (showOn) drawSOS();
+            u8g2.sendBuffer();
+
+            if (flashFrame >= 10) {
+                if (flashNoRoute) {
+                    u8g2.clearBuffer();
+                    drawTopHalf();
+                    u8g2.setFont(u8g2_font_logisoso16_tr);
+                    const char* sf = "SEND FAILED";
+                    u8g2.drawStr((128 - u8g2.getStrWidth(sf)) / 2, 52, sf);
+                    u8g2.sendBuffer();
+                    dispState = DS_SEND_FAILED;
+                    sendFailedAt = now;
+                } else {
+                    u8g2.clearBuffer();
+                    drawTopHalf();
+                    drawSOS();
+                    u8g2.sendBuffer();
+                    dispState = DS_SOS_SENT;
+                }
+            }
+        }
+    }
+
+    if (dispState == DS_SEND_FAILED) {
+        if (now - sendFailedAt >= 5000) {
+            u8g2.clearBuffer();
+            drawTopHalf();
+            drawTXHome();
+            u8g2.sendBuffer();
+            dispState = DS_HOME;
+        }
+    }
+}
+
 void loop() {
 	const size_t BUF_SZ = 256;
 
@@ -1042,6 +1072,7 @@ void loop() {
                 drawTopHalf();
                 drawSOS();
                 u8g2.sendBuffer();
+                dispState = DS_SOS_SENT;
             }
         } else {
             Serial.println("Max retries reached - SEND FAILED");
@@ -1052,11 +1083,8 @@ void loop() {
             const char* sf = "SEND FAILED";
             u8g2.drawStr((128 - u8g2.getStrWidth(sf)) / 2, 52, sf);
             u8g2.sendBuffer();
-            delay(5000);
-            u8g2.clearBuffer();
-            drawTopHalf();
-            drawTXHome();
-            u8g2.sendBuffer();
+            dispState = DS_SEND_FAILED;
+            sendFailedAt = millis();
         }
     }
 
@@ -1119,8 +1147,9 @@ void loop() {
 
 	
 	
-	handleRX(); 
-	handleTX(); 
+	handleRX();
+	handleTX();
+    updateDisplay();
 
 }
 
