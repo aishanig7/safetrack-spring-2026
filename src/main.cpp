@@ -105,9 +105,7 @@ void setup();
 void loop();
 String bytesToAscii(const uint8_t *, size_t);
 
-//Role Definitions
-#define ROLE_TX      // comment out for receiver node
-//#define ROLE_RX    // uncomment for receiver node
+
 
 bool channelBusy() {
     return (millis() - lastRXActivity) < 600;
@@ -172,12 +170,12 @@ static void drawRXHome() {
 }
 
 static void drawSOS() {
-    drawWarningTriangle(10, 62);
-    drawWarningTriangle(118, 62);
     u8g2.setFont(u8g2_font_logisoso16_tr);
     const char* s = "SOS SENT";
     int w = u8g2.getStrWidth(s);
-    u8g2.drawStr((128 - w) / 2, 54, s);
+    u8g2.drawStr((128 - w) / 2, 52, s);
+    drawWarningTriangle(10, 50);
+    drawWarningTriangle(118, 50);
 }
 
 static void drawConfirmed() {
@@ -202,11 +200,7 @@ void readGPS() {
 
         u8g2.clearBuffer();
         drawTopHalf();
-#ifdef ROLE_TX
         drawTXHome();
-#else
-        drawRXHome();
-#endif
         u8g2.sendBuffer();
     }
 }
@@ -248,8 +242,8 @@ void sendHello() {
     //const unsigned long HELLO_INTERVAL = 15000;
     static unsigned long lastHello = 0;
 
-    const unsigned long HELLO_BASE = 3000;
-    const unsigned long HELLO_JITTER = 1000;
+    const unsigned long HELLO_BASE = 20000;
+    const unsigned long HELLO_JITTER = 5000;
 
     static unsigned long nextHelloIn = HELLO_BASE + random(0, HELLO_JITTER);
 
@@ -573,8 +567,32 @@ void handleTX() {
 
            pkt.nextHop = selectNextHop(pkt.dst, NODE_ID);
 
+            // Flash SOS immediately on button press
+            for (int i = 0; i < 5; i++) {
+                u8g2.clearBuffer();
+                drawTopHalf();
+                drawSOS();
+                u8g2.sendBuffer();
+                delay(500);
+                u8g2.clearBuffer();
+                drawTopHalf();
+                u8g2.sendBuffer();
+                delay(500);
+            }
+
             if (pkt.nextHop == 0) {
                 Serial.println("No route yet, waiting for HELLO convergence...");
+                u8g2.clearBuffer();
+                drawTopHalf();
+                u8g2.setFont(u8g2_font_logisoso16_tr);
+                const char* sf = "SEND FAILED";
+                u8g2.drawStr((128 - u8g2.getStrWidth(sf)) / 2, 52, sf);
+                u8g2.sendBuffer();
+                delay(5000);
+                u8g2.clearBuffer();
+                drawTopHalf();
+                drawTXHome();
+                u8g2.sendBuffer();
                 lastButtonState = buttonState;
                 return;
             }
@@ -598,18 +616,7 @@ void handleTX() {
             pendingSentAt = millis();
             pendingRetries = 0;
 
-            // SOS flash: 5 blinks then stay on
-            for (int i = 0; i < 5; i++) {
-                u8g2.clearBuffer();
-                drawTopHalf();
-                drawSOS();
-                u8g2.sendBuffer();
-                delay(500);
-                u8g2.clearBuffer();
-                drawTopHalf();
-                u8g2.sendBuffer();
-                delay(500);
-            }
+            // Stay on SOS SENT
             u8g2.clearBuffer();
             drawTopHalf();
             drawSOS();
@@ -760,16 +767,11 @@ void handleRX() {
         rxDisplayLng = rxLng;
         rxDisplaySrc = pkt->src;
 
-        char fromStr[20];
-        snprintf(fromStr, sizeof(fromStr), "From: SAFE-%04X", pkt->src);
-        char coordStr[22];
-        snprintf(coordStr, sizeof(coordStr), "%.4f, %.4f", rxLat, rxLng);
         u8g2.clearBuffer();
         drawTopHalf();
-        u8g2.setFont(u8g2_font_5x7_tr);
-        u8g2.drawStr(0, 22, fromStr);
-        u8g2.drawStr(0, 33, coordStr);
-        drawConfirmed();
+        u8g2.setFont(u8g2_font_logisoso16_tr);
+        const char* sosRx = "SOS RECEIVED";
+        u8g2.drawStr((128 - u8g2.getStrWidth(sosRx)) / 2, 52, sosRx);
         u8g2.sendBuffer();
 
         MeshPacket ack = {};
@@ -881,12 +883,10 @@ void handleRX() {
             delay(10);
             radio.setPacketReceivedAction(setFlag);
             radio.startReceive();
-#ifdef ROLE_TX
             u8g2.clearBuffer();
             drawTopHalf();
             drawTXHome();
             u8g2.sendBuffer();
-#endif
         }
     }
 
@@ -895,13 +895,23 @@ void handleRX() {
 
 void bootScreen() {
     u8g2.begin();
-    u8g2.clearBuffer();
-    u8g2.setFont(u8g2_font_logisoso20_tr);
     const char* text = "SAFETRACK";
-    int w = u8g2.getStrWidth(text);
-    u8g2.drawStr((128 - w) / 2, (64 + 20) / 2, text);
-    u8g2.sendBuffer();
-    delay(5000);
+    u8g2.setFont(u8g2_font_logisoso20_tr);
+    int fullW = u8g2.getStrWidth(text);
+    int startX = (128 - fullW) / 2;
+    int y = (64 + 20) / 2;
+
+    char partial[11];
+    for (int i = 1; i <= 9; i++) {
+        strncpy(partial, text, i);
+        partial[i] = '\0';
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_logisoso20_tr);
+        u8g2.drawStr(startX, y, partial);
+        u8g2.sendBuffer();
+        delay(100);
+    }
+    delay(2850);
 }
 
 void setup(){
@@ -973,11 +983,7 @@ void setup(){
 	delay(1000);
     u8g2.clearBuffer();
     drawTopHalf();
-#ifdef ROLE_TX
     drawTXHome();
-#else
-    drawRXHome();
-#endif
     u8g2.sendBuffer();
 
     delay(random(1000, 4000));
@@ -1032,14 +1038,24 @@ void loop() {
                 radio.setPacketReceivedAction(setFlag);
                 radio.startReceive();
                 pendingSentAt = millis();
+                u8g2.clearBuffer();
+                drawTopHalf();
+                drawSOS();
+                u8g2.sendBuffer();
             }
         } else {
             Serial.println("Max retries reached - SEND FAILED");
             pendingACK = false;
             u8g2.clearBuffer();
             drawTopHalf();
-            u8g2.setFont(u8g2_font_7x13B_tr);
-            u8g2.drawStr(10, 56, "SEND FAILED");
+            u8g2.setFont(u8g2_font_logisoso16_tr);
+            const char* sf = "SEND FAILED";
+            u8g2.drawStr((128 - u8g2.getStrWidth(sf)) / 2, 52, sf);
+            u8g2.sendBuffer();
+            delay(5000);
+            u8g2.clearBuffer();
+            drawTopHalf();
+            drawTXHome();
             u8g2.sendBuffer();
         }
     }
