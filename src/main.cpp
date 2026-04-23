@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <U8g2lib.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <TinyGPSPlus.h>
@@ -835,8 +836,21 @@ void handleRX() {
     radio.startReceive();
 }
 
+void bootScreen() {
+    U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+    u8g2.begin();
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_logisoso20_tr);
+    const char* text = "SAFETRACK";
+    int w = u8g2.getStrWidth(text);
+    u8g2.drawStr((128 - w) / 2, (64 + 20) / 2, text);
+    u8g2.sendBuffer();
+    delay(5000);
+}
+
 void setup(){
-    Serial.begin(115200); 
+    bootScreen();
+    Serial.begin(115200);
 	delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -866,13 +880,6 @@ void setup(){
 	
 	// display boot
 	memset(buffer, 0, sizeof(buffer)); // set loop display buffer with zeros
-	display.clearDisplay();
-	display.setTextSize(1);
-	display.setTextColor(SSD1306_WHITE);
-	display.setCursor(0, 0);
-	display.println("Booting or smth...");
-	display.display();
-
 	// modem init
 	// initialize SX1262 with default settings
 	Serial.print(F("[SX1262] Initializing ... "));
