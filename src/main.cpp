@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 #include <TinyGPSPlus.h>
 #include <RadioLib.h>
 #include <SPI.h>
@@ -13,9 +11,6 @@
 //Hardware and Pins
 #define LED (0 + 15)
 #define BUTTON_PIN (0+32)
-#define OLED_RESET -1
-#define DISPLAY_WIDTH 128
-#define DISPLAY_HEIGHT 64
 
 int32_t counter = 0; 
 // Node and Mesh
@@ -64,19 +59,17 @@ uint8_t pendingRetries = 0;
 #define ACK_TIMEOUT 5000
 
 //Objects
-Adafruit_SSD1306 display(128, 64, &Wire, OLED_RESET);
+U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 SX1262 radio = new Module(SX126X_CS, SX126X_DIO1, SX126X_RESET, SX126X_BUSY);
 TinyGPSPlus gps;
 
-uint8_t buffer[DISPLAY_WIDTH * DISPLAY_HEIGHT / 8];
-char latBuffer[30]; // Buffer for latitude display
-char lngBuffer[30]; // Buffer for longitude display
-char dateBuffer[30]; // Buffer for date display
-char recvBuffer[64]; // Buffer for LoRa recv display
-char rssiBuffer[30]; // Buffer for rssi
-
 double lastLat = 0;
 double lastLng = 0;
+bool gpsValid = false;
+uint8_t fwdDots = 0;
+double rxDisplayLat = 0;
+double rxDisplayLng = 0;
+uint8_t rxDisplaySrc = 0;
 TinyGPSDate lastDate;
 
 //Data Structures
@@ -113,8 +106,8 @@ void loop();
 String bytesToAscii(const uint8_t *, size_t);
 
 //Role Definitions
-//#define ROLE_TX
-#define ROLE_RX
+#define ROLE_TX      // comment out for receiver node
+//#define ROLE_RX    // uncomment for receiver node
 
 bool channelBusy() {
     return (millis() - lastRXActivity) < 600;
@@ -134,6 +127,70 @@ void setFlag(void) {
   receivedFlag = true;
 }
 
+// ── UI helpers ────────────────────────────────────────────────────────────────
+
+static void drawBattery(int x, int y) {
+    u8g2.drawFrame(x, y, 18, 8);
+    u8g2.drawBox(x + 18, y + 2, 2, 4);
+    u8g2.drawBox(x + 2, y + 2, 13, 4);
+}
+
+static void drawWarningTriangle(int cx, int by) {
+    u8g2.drawLine(cx, by - 12, cx - 7, by);
+    u8g2.drawLine(cx - 7, by, cx + 7, by);
+    u8g2.drawLine(cx + 7, by, cx, by - 12);
+    u8g2.drawVLine(cx, by - 9, 5);
+    u8g2.drawPixel(cx, by - 2);
+}
+
+static void drawTopHalf() {
+    char nodeName[12];
+    snprintf(nodeName, sizeof(nodeName), "SAFE-%04X", NODE_ID);
+    u8g2.setFont(u8g2_font_5x7_tr);
+    u8g2.drawStr(0, 8, nodeName);
+    drawBattery(108, 1);
+}
+
+static void drawTXHome() {
+    drawWarningTriangle(26, 46);
+    drawWarningTriangle(102, 46);
+    u8g2.setFont(u8g2_font_logisoso24_tr);
+    const char* s = "SOS";
+    int w = u8g2.getStrWidth(s);
+    u8g2.drawStr((128 - w) / 2, 52, s);
+}
+
+static void drawRXHome() {
+    u8g2.setFont(u8g2_font_6x10_tr);
+    if (rxDisplaySrc != 0) {
+        char buf[22];
+        snprintf(buf, sizeof(buf), "Lat: %.6f", rxDisplayLat);
+        u8g2.drawStr(0, 26, buf);
+        snprintf(buf, sizeof(buf), "Lng: %.6f", rxDisplayLng);
+        u8g2.drawStr(0, 38, buf);
+    }
+}
+
+static void drawSOS() {
+    drawWarningTriangle(10, 62);
+    drawWarningTriangle(118, 62);
+    u8g2.setFont(u8g2_font_logisoso16_tr);
+    const char* s = "SOS SENT";
+    int w = u8g2.getStrWidth(s);
+    u8g2.drawStr((128 - w) / 2, 54, s);
+}
+
+static void drawConfirmed() {
+    u8g2.drawLine(4, 55, 8, 60);
+    u8g2.drawLine(8, 60, 18, 48);
+    u8g2.drawLine(5, 55, 9, 60);
+    u8g2.drawLine(9, 60, 19, 48);
+    u8g2.setFont(u8g2_font_7x13B_tr);
+    u8g2.drawStr(24, 61, "Confirmed!");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+
 void readGPS() {
     double lat = gps.location.lat();
     double lng = gps.location.lng();
@@ -141,16 +198,16 @@ void readGPS() {
     if (lat != lastLat || lng != lastLng) {
         lastLat = lat;
         lastLng = lng;
+        gpsValid = true;
 
-        display.setCursor(0, 0);
-        display.print("Lat: ");
-        display.print(lat, 6);
-
-        display.setCursor(0, 10);
-        display.print("Lng: ");
-        display.print(lng, 6);
-
-        display.display();
+        u8g2.clearBuffer();
+        drawTopHalf();
+#ifdef ROLE_TX
+        drawTXHome();
+#else
+        drawRXHome();
+#endif
+        u8g2.sendBuffer();
     }
 }
 
@@ -191,8 +248,8 @@ void sendHello() {
     //const unsigned long HELLO_INTERVAL = 15000;
     static unsigned long lastHello = 0;
 
-    const unsigned long HELLO_BASE = 20000;
-    const unsigned long HELLO_JITTER = 5000;
+    const unsigned long HELLO_BASE = 3000;
+    const unsigned long HELLO_JITTER = 1000;
 
     static unsigned long nextHelloIn = HELLO_BASE + random(0, HELLO_JITTER);
 
@@ -490,9 +547,6 @@ void handleTX() {
             }
 
             Serial.println("Button Pressed Once!");
-            display.setCursor(0,40); 
-            display.print("TX: Packet sent"); 
-            display.display(); 
 
             static uint16_t seqCounter = 0;
 
@@ -525,11 +579,6 @@ void handleTX() {
                 return;
             }
 
-            display.setCursor(0, 50);
-            display.print("FWD: ");
-            display.print(pkt.nextHop);
-            display.display();
-
             delay(random(40, 200));
             radio.standby();
 
@@ -538,7 +587,7 @@ void handleTX() {
                 delay(getBackoff(PRI_GPS));
             }
             radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-            lastRXActivity = millis(); 
+            lastRXActivity = millis();
             delay(10);
             radio.setPacketReceivedAction(setFlag);
             radio.startReceive();
@@ -548,6 +597,23 @@ void handleTX() {
             pendingSeq = pkt.seq;
             pendingSentAt = millis();
             pendingRetries = 0;
+
+            // SOS flash: 5 blinks then stay on
+            for (int i = 0; i < 5; i++) {
+                u8g2.clearBuffer();
+                drawTopHalf();
+                drawSOS();
+                u8g2.sendBuffer();
+                delay(500);
+                u8g2.clearBuffer();
+                drawTopHalf();
+                u8g2.sendBuffer();
+                delay(500);
+            }
+            u8g2.clearBuffer();
+            drawTopHalf();
+            drawSOS();
+            u8g2.sendBuffer();
         }
         lastButtonState = buttonState;
     }
@@ -668,14 +734,10 @@ void handleRX() {
             Serial.println("Pending ACK cleared");
         }
 
-        display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-        display.setCursor(0, 40);
-        display.print("ACK received!");
-        display.setCursor(0, 50);
-        display.print("seq=");
-        display.print(ackPayload.originalSeq);
-        display.display();
+        u8g2.clearBuffer();
+        drawTopHalf();
+        drawConfirmed();
+        u8g2.sendBuffer();
         radio.startReceive();
         return;
     }
@@ -686,23 +748,6 @@ void handleRX() {
         Serial.print(" lastHop=");
         Serial.println(pkt->lastHop);
 
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-        display.setCursor(0,10); 
-        display.print("RSSI: ");
-        display.print((int)rssi);
-        display.print(" ");
-        display.print("SNR: "); 
-        display.print(snr, 1); 
-        display.setCursor(0,20);
-        display.print("dest: ");
-        display.print(pkt->dst);
-        display.print(" "); 
-        display.print("pkt id: ");
-        display.print(pkt->seq); 
-        display.setCursor(0,30);
-        display.print("next hop: "); 
-        display.print(pkt->nextHop); 
-        display.display(); 
     }
 
     // Packet reached final destination
@@ -711,19 +756,21 @@ void handleRX() {
         uint8_t rxNode;
         parsePacket(pkt->payload, rxLat, rxLng, rxNode);
 
-        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-        display.setCursor(0, 40);
-        display.print("RX ");
-        display.print(pkt->src);
-        display.print(": ");
-        display.print(rxLat, 4);
-        display.print(",");
-        display.print(rxLng, 4);
+        rxDisplayLat = rxLat;
+        rxDisplayLng = rxLng;
+        rxDisplaySrc = pkt->src;
 
-        display.setCursor(50, 50);
-        display.print("Last Hop: ");
-        display.print(pkt->lastHop); 
-        display.display();
+        char fromStr[20];
+        snprintf(fromStr, sizeof(fromStr), "From: SAFE-%04X", pkt->src);
+        char coordStr[22];
+        snprintf(coordStr, sizeof(coordStr), "%.4f, %.4f", rxLat, rxLng);
+        u8g2.clearBuffer();
+        drawTopHalf();
+        u8g2.setFont(u8g2_font_5x7_tr);
+        u8g2.drawStr(0, 22, fromStr);
+        u8g2.drawStr(0, 33, coordStr);
+        drawConfirmed();
+        u8g2.sendBuffer();
 
         MeshPacket ack = {};
         ack.src = NODE_ID;
@@ -804,11 +851,15 @@ void handleRX() {
             Serial.print(" to node: ");
             Serial.println(pkt->nextHop);
 
-            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-            display.setCursor(0, 50);
-            display.print("FWD: ");
-            display.print(pkt->nextHop);
-            display.display();
+            fwdDots = (fwdDots % 3) + 1;
+            const char* fwdSuffixes[] = {".", "..", "..."};
+            char fwdStr[16];
+            snprintf(fwdStr, sizeof(fwdStr), "Forwarding%s", fwdSuffixes[fwdDots - 1]);
+            u8g2.clearBuffer();
+            drawTopHalf();
+            u8g2.setFont(u8g2_font_6x10_tr);
+            u8g2.drawStr(0, 52, fwdStr);
+            u8g2.sendBuffer();
 
             delay(random(40, 200));
             //radio.standby(); 
@@ -830,6 +881,12 @@ void handleRX() {
             delay(10);
             radio.setPacketReceivedAction(setFlag);
             radio.startReceive();
+#ifdef ROLE_TX
+            u8g2.clearBuffer();
+            drawTopHalf();
+            drawTXHome();
+            u8g2.sendBuffer();
+#endif
         }
     }
 
@@ -837,7 +894,6 @@ void handleRX() {
 }
 
 void bootScreen() {
-    U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
     u8g2.begin();
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_logisoso20_tr);
@@ -873,13 +929,6 @@ void setup(){
 	gpsSerial.begin(9600);
 	//SPI.begin(); // uses variant default SPI pins
 
-	if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { //if error then builtin led light up
-	  digitalWrite(LED, HIGH); //Set the LED to high
-	  while (true);
-	}
-	
-	// display boot
-	memset(buffer, 0, sizeof(buffer)); // set loop display buffer with zeros
 	// modem init
 	// initialize SX1262 with default settings
 	Serial.print(F("[SX1262] Initializing ... "));
@@ -922,28 +971,14 @@ void setup(){
 	Serial.println("boot successful...");
 	
 	delay(1000);
-	display.clearDisplay();
-	display.display();
-	
-    /*
-    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // White text on black background (for overwr)
-	display.setCursor(0, 0);
-	display.print("Lat: NONE");
-	display.setCursor(0, 10);
-	display.print("Lng: NONE");
-	display.setCursor(0, 20);
-	display.print("Date: NONE");
-	display.setCursor(0, 30);
-	display.print("Node ID: ");
-	display.print(NODE_ID); 
-	display.display();
-    */
-
-    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-    display.setCursor(0, 0);
-    display.print("Node ID: ");
-	display.print(NODE_ID);
-    display.display(); 
+    u8g2.clearBuffer();
+    drawTopHalf();
+#ifdef ROLE_TX
+    drawTXHome();
+#else
+    drawRXHome();
+#endif
+    u8g2.sendBuffer();
 
     delay(random(1000, 4000));
 
@@ -981,14 +1016,13 @@ void loop() {
                 pendingSentAt = millis();
                 pendingRetries--;
             } else {
-                display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
-                display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-                display.setCursor(0, 40);
-                display.print("Retry ");
-                display.print(pendingRetries);
-                display.print("/");
-                display.print(MAX_RETRIES);
-                display.display();
+                char retryStr[20];
+                snprintf(retryStr, sizeof(retryStr), "Retry %d/%d...", pendingRetries, MAX_RETRIES);
+                u8g2.clearBuffer();
+                drawTopHalf();
+                u8g2.setFont(u8g2_font_6x10_tr);
+                u8g2.drawStr(0, 52, retryStr);
+                u8g2.sendBuffer();
 
                 if (channelBusy()) delay(getBackoff(PRI_GPS));
                 radio.standby();
@@ -1002,11 +1036,11 @@ void loop() {
         } else {
             Serial.println("Max retries reached - SEND FAILED");
             pendingACK = false;
-            display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
-            display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-            display.setCursor(0, 40);
-            display.print("SEND FAILED");
-            display.display();
+            u8g2.clearBuffer();
+            drawTopHalf();
+            u8g2.setFont(u8g2_font_7x13B_tr);
+            u8g2.drawStr(10, 56, "SEND FAILED");
+            u8g2.sendBuffer();
         }
     }
 
