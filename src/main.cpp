@@ -8,6 +8,8 @@
 #include <cstdio>
 #include "gpsPacket.h"
 #include "meshPacket.h"
+#include "mesh_crypto.h"
+#include "tests/crypto_tests.h"
 
 //Hardware and Pins
 #define LED (0 + 15)
@@ -239,14 +241,19 @@ void sendHello() {
             return;
         }
 
-        radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-        lastRXActivity = millis(); 
+        EncryptedMeshPacket encHello;
+        if (!encryptMeshPacket(&pkt, &encHello)) {
+            Serial.println("[CRYPTO] Encryption failed in sendHello!");
+            return;
+        }
+        radio.transmit((uint8_t*)&encHello, sizeof(EncryptedMeshPacket));
+        lastRXActivity = millis();
         delay(10);
         radio.setPacketReceivedAction(setFlag);
         int rxState = radio.startReceive();
         Serial.print("startReceive after HELLO: ");
         Serial.println(rxState);
-        Serial.println("HELLO sent");
+        Serial.println("HELLO sent (encrypted)");
     }
 }
 
@@ -460,7 +467,12 @@ bool reliableTransmit(MeshPacket &pkt, uint8_t maxRetries) {
             delay(getBackoff(PRI_ACK));
         }
 
-        int state = radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
+        EncryptedMeshPacket encPkt;
+        if (!encryptMeshPacket(&pkt, &encPkt)) {
+            Serial.println("[CRYPTO] Encryption failed in reliableTransmit!");
+            return false;
+        }
+        int state = radio.transmit((uint8_t*)&encPkt, sizeof(EncryptedMeshPacket));
 
         if (state == RADIOLIB_ERR_NONE) {
             delay(10);
@@ -536,8 +548,14 @@ void handleTX() {
                 Serial.println("GPS delayed due to busy channel");
                 delay(getBackoff(PRI_GPS));
             }
-            radio.transmit((uint8_t*)&pkt, sizeof(MeshPacket));
-            lastRXActivity = millis(); 
+            EncryptedMeshPacket encTx;
+            if (!encryptMeshPacket(&pkt, &encTx)) {
+                Serial.println("[CRYPTO] Encryption failed in handleTX!");
+                lastButtonState = buttonState;
+                return;
+            }
+            radio.transmit((uint8_t*)&encTx, sizeof(EncryptedMeshPacket));
+            lastRXActivity = millis();
             delay(10);
             radio.setPacketReceivedAction(setFlag);
             radio.startReceive();
@@ -558,10 +576,14 @@ void handleRX() {
     receivedFlag = false;
     lastRXActivity = millis();
 
-    uint8_t inBuf[sizeof(MeshPacket)];
+    uint8_t inBuf[sizeof(EncryptedMeshPacket)];
     int len = radio.getPacketLength();
 
-    if (len > sizeof(MeshPacket)) {
+    if (len != sizeof(EncryptedMeshPacket)) {
+        Serial.print("[RX] Dropped bad len=");
+        Serial.print(len);
+        Serial.print(" expected=");
+        Serial.println((int)sizeof(EncryptedMeshPacket));
         radio.startReceive();
         return;
     }
@@ -570,21 +592,26 @@ void handleRX() {
     float rssi = radio.getRSSI();
     float snr = radio.getSNR();
 
-    MeshPacket *rawPkt = (MeshPacket*)inBuf;
-    Serial.print("RAW RX: type=");
-    Serial.print(rawPkt->type);
-    Serial.print(" src=");
-    Serial.print(rawPkt->src);
-    Serial.print(" dst=");
-    Serial.println(rawPkt->dst);
-
     if (state != RADIOLIB_ERR_NONE) {
         radio.startReceive();
         return;
     }
 
+    EncryptedMeshPacket *encRx = (EncryptedMeshPacket*)inBuf;
+    MeshPacket decPkt;
+    if (!decryptMeshPacket(encRx, &decPkt)) {
+        Serial.println("[CRYPTO] Decryption failed");
+        radio.startReceive();
+        return;
+    }
+    MeshPacket *pkt = &decPkt;
 
-    MeshPacket *pkt = (MeshPacket*)inBuf;
+    Serial.print("RAW RX: type=");
+    Serial.print(pkt->type);
+    Serial.print(" src=");
+    Serial.print(pkt->src);
+    Serial.print(" dst=");
+    Serial.println(pkt->dst);
 
     // Ignore own packets
     if (pkt->src == NODE_ID) {
@@ -822,8 +849,13 @@ void handleRX() {
                 attempts++;
             }
 
-            //default send 
-            radio.transmit((uint8_t*)pkt, len);
+            EncryptedMeshPacket fwdPkt;
+            if (!encryptMeshPacket(pkt, &fwdPkt)) {
+                Serial.println("[CRYPTO] Re-encryption failed in forward!");
+                radio.startReceive();
+                return;
+            }
+            radio.transmit((uint8_t*)&fwdPkt, sizeof(EncryptedMeshPacket));
             markSeen(pkt->src, pkt->seq); 
             lastRXActivity = millis();
             delay(10);
@@ -836,8 +868,9 @@ void handleRX() {
 }
 
 void setup(){
-    Serial.begin(115200); 
-	delay(1000); 
+    Serial.begin(115200);
+    unsigned long _t = millis();
+    while (!Serial && (millis() - _t < 3000)) { delay(10); }
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
 	digitalWrite(LED, LOW);
@@ -863,6 +896,18 @@ void setup(){
 	  digitalWrite(LED, HIGH); //Set the LED to high
 	  while (true);
 	}
+
+	if (!initCrypto()) {
+	  Serial.println("[CRYPTO] Initialization failed!");
+	  digitalWrite(LED, HIGH);
+	  while (true) { delay(1000); }
+	}
+	if (!testCrypto()) {
+	  Serial.println("[CRYPTO] Self-tests failed!");
+	  digitalWrite(LED, HIGH);
+	  while (true) { delay(1000); }
+	}
+	measureCryptoLatency();
 	
 	// display boot
 	memset(buffer, 0, sizeof(buffer)); // set loop display buffer with zeros
@@ -950,6 +995,14 @@ void loop() {
         gps.encode(gpsSerial.read());
     }
 
+    static unsigned long lastHeartbeat = 0;
+    if (millis() - lastHeartbeat > 5000) {
+        lastHeartbeat = millis();
+        Serial.print("[ALIVE] uptime=");
+        Serial.print(millis() / 1000);
+        Serial.println("s");
+    }
+
     //Checking that packets are actually being received
     if (millis() - lastRXActivity > 55000) {
         Serial.println("WATCHDOG: restarting RX mode");
@@ -985,7 +1038,15 @@ void loop() {
 
                 if (channelBusy()) delay(getBackoff(PRI_GPS));
                 radio.standby();
-                radio.transmit((uint8_t*)&pendingPkt, sizeof(MeshPacket));
+                EncryptedMeshPacket encRetry;
+                if (!encryptMeshPacket(&pendingPkt, &encRetry)) {
+                    Serial.println("[CRYPTO] Encryption failed in retry!");
+                    pendingSentAt = millis();
+                    pendingRetries--;
+                    radio.startReceive();
+                    return;
+                }
+                radio.transmit((uint8_t*)&encRetry, sizeof(EncryptedMeshPacket));
                 lastRXActivity = millis();
                 delay(10);
                 radio.setPacketReceivedAction(setFlag);
