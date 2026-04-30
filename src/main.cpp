@@ -107,11 +107,17 @@ int flashFrame = 0;
 bool flashNoRoute = false;
 unsigned long sendFailedAt = 0;
 
+// Battery state
+uint8_t battPct = 100;
+bool battUSB = false;
+unsigned long lastBattSample = 0;
+
 // Declarations Functions
 void setFlag(void);
 void setup();
 void loop();
 void updateDisplay();
+void readBattery();
 String bytesToAscii(const uint8_t *, size_t);
 
 
@@ -136,10 +142,11 @@ void setFlag(void) {
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
-static void drawBattery(int x, int y) {
+static void drawBattery(int x, int y, uint8_t pct, bool usb) {
     u8g2.drawFrame(x, y, 18, 8);
     u8g2.drawBox(x + 18, y + 2, 2, 4);
-    u8g2.drawBox(x + 2, y + 2, 13, 4);
+    int fillW = usb ? 13 : (pct * 13) / 100;
+    if (fillW > 0) u8g2.drawBox(x + 2, y + 2, fillW, 4);
 }
 
 static void drawWarningTriangle(int cx, int by) {
@@ -155,7 +162,7 @@ static void drawTopHalf() {
     snprintf(nodeName, sizeof(nodeName), "SAFE-%04X", NODE_ID);
     u8g2.setFont(u8g2_font_5x7_tr);
     u8g2.drawStr(0, 8, nodeName);
-    drawBattery(108, 1);
+    drawBattery(108, 1, battPct, battUSB);
 }
 
 static void drawTXHome() {
@@ -878,6 +885,48 @@ void handleRX() {
     radio.startReceive();
 }
 
+void readBattery() {
+    battUSB = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+    if (battUSB) {
+        Serial.println("[BATT] Voltage: --V | Level: --% | USB: YES");
+        return;
+    }
+
+    volatile uint32_t raw = 0;
+    NRF_SAADC->ENABLE = 1;
+    NRF_SAADC->RESOLUTION = SAADC_RESOLUTION_VAL_12bit;
+    NRF_SAADC->CH[0].CONFIG =
+        (SAADC_CH_CONFIG_GAIN_Gain1_4   << SAADC_CH_CONFIG_GAIN_Pos)   |
+        (SAADC_CH_CONFIG_MODE_SE        << SAADC_CH_CONFIG_MODE_Pos)   |
+        (SAADC_CH_CONFIG_REFSEL_Internal << SAADC_CH_CONFIG_REFSEL_Pos);
+    NRF_SAADC->CH[0].PSELP = SAADC_CH_PSELP_PSELP_VDDHDIV5;
+    NRF_SAADC->CH[0].PSELN = SAADC_CH_PSELN_PSELN_NC;
+    NRF_SAADC->RESULT.PTR   = (uint32_t)&raw;
+    NRF_SAADC->RESULT.MAXCNT = 1;
+    NRF_SAADC->TASKS_START = 1;
+    while (!NRF_SAADC->EVENTS_STARTED);
+    NRF_SAADC->EVENTS_STARTED = 0;
+    NRF_SAADC->TASKS_SAMPLE = 1;
+    while (!NRF_SAADC->EVENTS_END);
+    NRF_SAADC->EVENTS_END = 0;
+    NRF_SAADC->TASKS_STOP = 1;
+    while (!NRF_SAADC->EVENTS_STOPPED);
+    NRF_SAADC->EVENTS_STOPPED = 0;
+    NRF_SAADC->ENABLE = 0;
+
+    float voltage = ((float)raw * 2.4f / 4095.0f) * 5.0f;
+    int pct = (int)(((voltage - 3.0f) / (4.2f - 3.0f)) * 100.0f);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    battPct = (uint8_t)pct;
+
+    Serial.print("[BATT] Voltage: ");
+    Serial.print(voltage, 2);
+    Serial.print("V | Level: ");
+    Serial.print(battPct);
+    Serial.println("% | USB: NO");
+}
+
 void bootScreen() {
     u8g2.begin();
     const char* text = "SAFETRACK";
@@ -971,6 +1020,9 @@ void setup(){
     drawTXHome();
     u8g2.sendBuffer();
 
+    readBattery();
+    lastBattSample = millis();
+
     delay(random(1000, 4000));
 
 }
@@ -1022,6 +1074,11 @@ void updateDisplay() {
 
 void loop() {
 	const size_t BUF_SZ = 256;
+
+    if (millis() - lastBattSample >= 30000) {
+        readBattery();
+        lastBattSample = millis();
+    }
 
     // Read and decode GPS data
     while (gpsSerial.available() > 0) {
