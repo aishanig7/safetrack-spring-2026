@@ -12,13 +12,15 @@
 
 //Hardware and Pins
 #define LED (0 + 15)
-#define BUTTON_PIN (0+32)
 #define OLED_RESET -1
 #define DISPLAY_WIDTH 128
 #define DISPLAY_HEIGHT 64
 
 int32_t counter = 0;
 // Node and Mesh
+//#define NODE_ID 1
+//#define NODE_ID 2
+#define NODE_ID 3
 
 #define DUP_CACHE_SIZE 8 
 #define MAX_NEIGHBORS 10
@@ -497,7 +499,7 @@ void handleTX() {
             }
 
             Serial.println("Button Pressed Once!");
-            display.setCursor(0,40); 
+            display.setCursor(0,10); 
             display.print("TX: Packet sent"); 
             display.display(); 
 
@@ -531,7 +533,12 @@ void handleTX() {
                 lastButtonState = buttonState;
                 return;
             }
-
+            display.setCursor(0,20);
+            display.print("packet dest: ");
+            display.print(pkt.dst);
+            display.setCursor(0,30);
+            display.print("packet id: ");
+            display.print(pkt.seq); 
             display.setCursor(0, 50);
             display.print("FWD: ");
             display.print(pkt.nextHop);
@@ -585,8 +592,16 @@ void handleRX() {
     }
 
     int state = radio.readData(inBuf, len);
+
     float rssi = radio.getRSSI();
     float snr = radio.getSNR();
+
+    Serial.print("PKT received type=");
+    Serial.print(((MeshPacket*)inBuf)->type);
+    Serial.print(" src=");
+    Serial.print(((MeshPacket*)inBuf)->src);
+    Serial.print(" dst=");
+    Serial.println(((MeshPacket*)inBuf)->dst);
 
     if (state != RADIOLIB_ERR_NONE) {
         radio.startReceive();
@@ -617,6 +632,7 @@ void handleRX() {
 
     /*
     // remove for outdoor testing
+    /*
     #if NODE_ID == 1
         if (pkt->lastHop == 3) {
             radio.startReceive();
@@ -629,9 +645,8 @@ void handleRX() {
             return;
         }
     #endif
-    */
-
-
+    */    
+  
     //stop if the packet already been seen before
     /*
     bool isDuplicate = seenBefore(pkt->src, pkt->seq);
@@ -702,6 +717,27 @@ void handleRX() {
         return;
     }
 
+    if (pkt->type == PKT_ACK && pkt->dst == NODE_ID) {
+        ACKPayload ackPayload;
+        memcpy(&ackPayload, pkt->payload, sizeof(ACKPayload));
+
+        Serial.print("ACK received for seq=");
+        Serial.println(ackPayload.originalSeq);
+
+        display.fillRect(0, 40, 128, 24, SSD1306_BLACK);
+        display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+        display.setCursor(0, 40);
+        display.print("ACK received!");
+        display.setCursor(0, 50);
+        display.print("seq=");
+        display.print(ackPayload.originalSeq);
+        display.display();
+
+        radio.startReceive();
+        return;
+    }
+
+    // DEBUG: show what this node received
     if (pkt->type == PKT_GPS) {
         Serial.print("RX from node ");
         Serial.print(pkt->src);
@@ -725,6 +761,8 @@ void handleRX() {
         display.print("next hop: "); 
         display.print(pkt->nextHop); 
         display.display(); 
+
+
     }
 
     // Packet reached final destination
@@ -747,9 +785,10 @@ void handleRX() {
         display.print(pkt->lastHop); 
         display.display();
 
+        // Build and send ACK
         MeshPacket ack = {};
-        ack.src = NodeIdentity::getNodeId();
-        ack.lastHop = NodeIdentity::getNodeId();
+        ack.src = NODE_ID;
+        ack.lastHop = NODE_ID;
         ack.dst = pkt->src;
         ack.ttl = 5;
         ack.type = PKT_ACK;
@@ -762,41 +801,20 @@ void handleRX() {
         ackPayload.originalSeq = pkt->seq;
         memcpy(ack.payload, &ackPayload, sizeof(ACKPayload));
 
-        ack.nextHop = selectNextHop(ack.dst, NodeIdentity::getNodeId());
-        Serial.print("ACK nextHop resolved: ");
-        Serial.println(ack.nextHop); 
-
-        if (ack.nextHop == 0) {
-            Serial.println("No route for ACK, using lastHop fallback");
-            ack.nextHop = pkt->lastHop;
-        }
-
+        ack.nextHop = selectNextHop(ack.dst, NODE_ID);
         if (ack.nextHop != 0) {
             Serial.print("Sending ACK to node ");
-            Serial.print(ack.dst);
-            Serial.print(" via nextHop=");
-            Serial.println(ack.nextHop);
+            Serial.println(ack.dst);
             delay(random(20, 80));
             radio.standby();
-
-            bool success = reliableTransmit(ack, 3);
-            Serial.print("ACK transmit success: ");
-            Serial.println(success ? "YES" : "NO");
-
-            if (!success) {
-                Serial.println("ACK failed after retries");
-            }
-
-            lastRXActivity = millis();
-            radio.setPacketReceivedAction(setFlag);
+            radio.transmit((uint8_t*)&ack, sizeof(MeshPacket));
         }
-        markSeen(pkt->src, pkt->seq);
         radio.startReceive();
         return;
     }
 
     // Forward if not final destination
-    if ((pkt->type == PKT_GPS || pkt->type == PKT_ACK) && pkt->dst != NodeIdentity::getNodeId() && pkt->ttl > 0) {
+    if ((pkt->type == PKT_GPS || pkt->type == PKT_ACK) && pkt->dst != NODE_ID && pkt->ttl > 0) {
 
         // Only forward if this node is the intended nextHop
         if (pkt->nextHop == NodeIdentity::getNodeId() || pkt->nextHop == MESH_BROADCAST) {
@@ -864,19 +882,24 @@ void handleRX() {
 }
 
 void setup(){
-    Serial.begin(115200);
-    NodeIdentity::initNodeIdentity();
-    const uint8_t* mac = NodeIdentity::getNodeMac();
-    Serial.printf(
-      "[Node] name=%s id=0x%02X role=%s mac=%02X:%02X:%02X:%02X:%02X:%02X\n",
-      NodeIdentity::getNodeName(), NodeIdentity::getNodeId(),
-      NodeIdentity::isHeadNode() ? "HEAD" : "FIELD",
-      mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]
-    );
-	delay(1000);
+    Serial.begin(9600); 
+	//delay(1000); 
 	pinMode(LED, OUTPUT); //set output mode
 	pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+##ifdef _VARIANT_PROMICRO_V2_DIY_
+	// give powah
+	pinMode(PIN_GPS_EN, OUTPUT);
+	pinMode(PIN_DISPLAY_EN, OUTPUT);
+	digitalWrite(PIN_GPS_EN, HIGH);
+	digitalWrite(PIN_DISPLAY_EN, HIGH);
+	delay(250);
+#endif // _VARIANT_PROMICRO_V2_DIY_
+
 	digitalWrite(LED, LOW);
+
+	Wire.begin();
+	SPI.begin();
 
 	for(int i = 0; i < MAX_NEIGHBORS; i++){
         neighbors[i].nodeID = 0;
@@ -930,16 +953,10 @@ void setup(){
 	} else {
 	  Serial.print(F("failed, code "));
 	  Serial.println(state);
-	  while (true) { delay(10); }
+	  while (true) { delay(10); 
+	  Serial.println("radio errored");}
 	}
 
-	Serial.print("radio.begin() -> ");
-	Serial.println(state);
-	if (state != RADIOLIB_ERR_NONE) {
-	  Serial.println("radio.begin() failed. Check wiring, power, constructor ordering.");
-	  while (true) { delay(1000); }
-	}
-	
 	// set modem parameters
 	radio.setFrequency(FREQ_MHZ);
 	radio.setSpreadingFactor(SF);
@@ -968,13 +985,15 @@ void setup(){
 	
     /*
     display.setTextColor(SSD1306_WHITE, SSD1306_BLACK); // White text on black background (for overwr)
+    /*
 	display.setCursor(0, 0);
 	display.print("Lat: NONE");
 	display.setCursor(0, 10);
 	display.print("Lng: NONE");
 	display.setCursor(0, 20);
 	display.print("Date: NONE");
-	display.setCursor(0, 30);
+    */
+	display.setCursor(0, 0);
 	display.print("Node ID: ");
 	display.print(NODE_ID); 
 	display.display();
@@ -1093,7 +1112,6 @@ void loop() {
         cleanStaleNeighbors();
     }
  
-
     /*
     if (dateUpdated) {
         TinyGPSDate date = gps.date;

@@ -7,6 +7,7 @@
 #define MAX_ADVERT_ROUTES 5
 #define PKT_ACK 0x04 
 
+
 struct MeshPacket {
   uint8_t src;
   uint8_t nextHop; 
@@ -19,13 +20,13 @@ struct MeshPacket {
 };
 
 struct RouteAdvertisement {
-    uint8_t dest;
-    uint8_t hops;
+  uint8_t dest;
+  uint8_t hops;
 };
 
 struct HelloPayload {
-    uint8_t routeCount;
-    RouteAdvertisement routes[MAX_ADVERT_ROUTES];
+  uint8_t routeCount;
+  RouteAdvertisement routes[MAX_ADVERT_ROUTES];
 };
 
 struct ACKPayload {
